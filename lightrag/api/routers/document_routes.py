@@ -2676,6 +2676,8 @@ def create_document_routes(
             # Convert documents to response format
             doc_responses = []
             for doc_id, doc in documents_with_ids:
+                # Log file_path value for debugging
+                logger.debug(f"Document {doc_id}: file_path = {repr(doc.file_path)}")
                 doc_responses.append(
                     DocStatusResponse(
                         id=doc_id,
@@ -2688,7 +2690,7 @@ def create_document_routes(
                         chunks_count=doc.chunks_count,
                         error_msg=doc.error_msg,
                         metadata=doc.metadata,
-                        file_path=doc.file_path,
+                        file_path=doc.file_path or "",  # Handle None file_path for text documents
                     )
                 )
 
