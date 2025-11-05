@@ -69,12 +69,12 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install system dependencies required by MinerU and other packages
-# libgl1-mesa-glx: OpenGL support for document parsing
+# libgl1: OpenGL support for document parsing (Debian 12 package name)
 # libglib2.0-0: GLib library required by OpenGL and other packages
 # libsm6, libxext6, libxrender-dev: X11 libraries for full OpenCV support
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libgl1-mesa-glx \
+        libgl1 \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
