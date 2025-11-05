@@ -40,7 +40,11 @@ services:
       - LLM_BINDING=ollama
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:latest}
       - LLM_BINDING_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - LLM_BINDING_API_KEY=${LLM_BINDING_API_KEY}
       - OLLAMA_LLM_NUM_CTX=${OLLAMA_LLM_NUM_CTX:-32768}
+      
+      # RAGAnything Configuration
+      - RAG_ANYTHING_ENABLED=${RAG_ANYTHING_ENABLED:-false}
       
       # Vision Model Configuration
       - VISION_MODEL=${VISION_MODEL:-qwen2-vl:latest}
