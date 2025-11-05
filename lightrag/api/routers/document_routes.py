@@ -1623,12 +1623,16 @@ async def pipeline_index_files_raganything(
         return
 
     try:
+        # Log initial parameters received by the function
+        logger.debug(f"[RAGAnything Pipeline] ENTRY - Received parser={repr(parser)}, source={repr(source)}")
+        logger.debug(f"[RAGAnything Pipeline] ENTRY - File count: {len(file_paths) if file_paths else 0}")
+        
         # Convert empty strings to None for MinerU compatibility
         # MinerU expects either valid strings ("huggingface", "modelscope", "local") or None
         parser = parser if parser and parser.strip() else None
         source = source if source and source.strip() else None
         
-        logger.debug(f"[MinerU Config] parser={repr(parser)}, source={repr(source)}")
+        logger.debug(f"[RAGAnything Pipeline] AFTER CONVERSION - parser={repr(parser)}, source={repr(source)}")
         
         # Use get_pinyin_sort_key for Chinese pinyin sorting
         sorted_file_paths = sorted(
@@ -1637,6 +1641,7 @@ async def pipeline_index_files_raganything(
 
         # Process files sequentially with track_id
         for file_path in sorted_file_paths:
+            logger.debug(f"[RAGAnything Pipeline] CALLING RAGAnything - file={file_path.name}, parser={repr(parser)}, source={repr(source)}")
             success = await rag_anything.process_document_complete_lightrag_api(
                 file_path=str(file_path),
                 output_dir="./output",
@@ -1645,6 +1650,7 @@ async def pipeline_index_files_raganything(
                 parser=parser,
                 source=source,
             )
+            logger.debug(f"[RAGAnything Pipeline] RESULT - file={file_path.name}, success={success}")
             if success:
                 pass
 
@@ -1758,6 +1764,7 @@ async def run_scanning_process(
                             f"Scanning process completed with lightrag: {len(valid_files)} files Processed."
                         )
                 elif scheme_name == "raganything":
+                    logger.debug(f"[Scanning Process] Calling pipeline_index_files_raganything - extractor={repr(extractor)}, modelSource={repr(modelSource)}")
                     await pipeline_index_files_raganything(
                         rag_anything,
                         valid_files,
@@ -1765,6 +1772,7 @@ async def run_scanning_process(
                         parser=extractor,
                         source=modelSource,
                     )
+                    logger.debug(f"[Scanning Process] Completed pipeline_index_files_raganything")
                     if processed_files:
                         logger.info(
                             f"Scanning process completed with raganything: {len(valid_files)} files Processed, {len(processed_files)} skipped."
@@ -2406,18 +2414,19 @@ def create_document_routes(
             current_modelSource = config.get("modelSource")
             doc_pre_id = f"doc-pre-{safe_filename}"
             
-            logger.debug(f"[Schema Debug] Raw values from config - framework={repr(current_framework)}, extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
+            logger.debug(f"[Upload Endpoint] Raw values from config - framework={repr(current_framework)}, extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
 
             # Convert empty strings to None for MinerU compatibility
             # MinerU expects either valid strings ("huggingface", "modelscope", "local") or None
             current_extractor = current_extractor if current_extractor and current_extractor.strip() else None
             current_modelSource = current_modelSource if current_modelSource and current_modelSource.strip() else None
             
-            logger.debug(f"[Schema Debug] After empty string conversion - extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
-            logger.debug(f"[MinerU Config Upload] Final values passed to MinerU - extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
+            logger.debug(f"[Upload Endpoint] After empty string conversion - extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
+            logger.debug(f"[Upload Endpoint] Final values passed to RAGAnything - extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
 
             if current_framework and current_framework == "lightrag":
                 # Add to background tasks and get track_id
+                logger.debug(f"[Upload Endpoint] Using LightRAG framework for {safe_filename}")
                 background_tasks.add_task(
                     pipeline_index_file,
                     rag,
@@ -2426,6 +2435,8 @@ def create_document_routes(
                     scheme_name=current_framework,
                 )
             else:
+                logger.debug(f"[Upload Endpoint] Using RAGAnything framework for {safe_filename}")
+                logger.debug(f"[Upload Endpoint] CALLING RAGAnything.process_document_complete_lightrag_api with parser={repr(current_extractor)}, source={repr(current_modelSource)}")
                 background_tasks.add_task(
                     rag_anything.process_document_complete_lightrag_api,
                     file_path=str(file_path),
@@ -2435,6 +2446,7 @@ def create_document_routes(
                     parser=current_extractor,
                     source=current_modelSource,
                 )
+                logger.debug(f"[Upload Endpoint] RAGAnything task added to background_tasks")
 
             await rag.doc_status.upsert(
                 {
