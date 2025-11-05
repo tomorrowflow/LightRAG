@@ -41,6 +41,21 @@ import { useScheme } from '@/contexts/SchemeContext';
 
 type StatusFilter = DocStatus | 'all';
 
+// Utility functions defined outside component for better performance and to avoid dependency issues
+const getCountValue = (counts: Record<string, number>, ...keys: string[]): number => {
+  for (const key of keys) {
+    const value = counts[key]
+    if (typeof value === 'number') {
+      return value
+    }
+  }
+  return 0
+}
+
+const hasActiveDocumentsStatus = (counts: Record<string, number>): boolean =>
+  getCountValue(counts, 'PROCESSING', 'processing') > 0 ||
+  getCountValue(counts, 'PENDING', 'pending') > 0 ||
+  getCountValue(counts, 'PREPROCESSED', 'preprocessed') > 0
 
 const getDisplayFileName = (doc: DocStatusResponse, maxLength: number = 20): string => {
   // Check if file_path exists and is a non-empty string
@@ -80,7 +95,13 @@ const formatMetadata = (metadata: Record<string, any>): string => {
     }
   }
 
-  return JSON.stringify(formattedMetadata, null, 2);
+  // Format JSON and remove outer braces and indentation
+  const jsonStr = JSON.stringify(formattedMetadata, null, 2);
+  const lines = jsonStr.split('\n');
+  // Remove first line ({) and last line (}), and remove leading indentation (2 spaces)
+  return lines.slice(1, -1)
+    .map(line => line.replace(/^ {2}/, ''))
+    .join('\n');
 };
 
 const pulseStyle = `
@@ -95,6 +116,8 @@ const pulseStyle = `
   z-index: 9999; /* Ensure tooltip appears above all other elements */
   max-width: 600px;
   white-space: normal;
+  word-break: break-word;
+  overflow-wrap: break-word;
   border-radius: 0.375rem;
   padding: 0.5rem 0.75rem;
   font-size: 0.75rem; /* 12px */
@@ -115,6 +138,12 @@ const pulseStyle = `
 .dark .tooltip {
   background-color: rgba(255, 255, 255, 0.95);
   color: black;
+}
+
+.tooltip pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 /* Position tooltip helper class */
@@ -233,6 +262,7 @@ export default function DocumentManager() {
   const [pageByStatus, setPageByStatus] = useState<Record<StatusFilter, number>>({
     all: 1,
     processed: 1,
+    preprocessed: 1,
     processing: 1,
     pending: 1,
     failed: 1,
@@ -301,6 +331,7 @@ export default function DocumentManager() {
     setPageByStatus({
       all: 1,
       processed: 1,
+      preprocessed: 1,
       processing: 1,
       pending: 1,
       failed: 1,
@@ -447,9 +478,19 @@ export default function DocumentManager() {
     return counts;
   }, [docs]);
 
+  const processedCount = getCountValue(statusCounts, 'PROCESSED', 'processed') || documentCounts.processed || 0;
+  const preprocessedCount =
+    getCountValue(statusCounts, 'PREPROCESSED', 'preprocessed') ||
+    documentCounts.preprocessed ||
+    0;
+  const processingCount = getCountValue(statusCounts, 'PROCESSING', 'processing') || documentCounts.processing || 0;
+  const pendingCount = getCountValue(statusCounts, 'PENDING', 'pending') || documentCounts.pending || 0;
+  const failedCount = getCountValue(statusCounts, 'FAILED', 'failed') || documentCounts.failed || 0;
+
   // Store previous status counts
   const prevStatusCounts = useRef({
     processed: 0,
+    preprocessed: 0,
     processing: 0,
     handling: 0,
     pending: 0,
@@ -542,6 +583,7 @@ export default function DocumentManager() {
     const legacyDocs: DocsStatusesResponse = {
       statuses: {
         processed: response.documents.filter((doc: DocStatusResponse) => doc.status === 'processed'),
+        preprocessed: response.documents.filter((doc: DocStatusResponse) => doc.status === 'preprocessed'),
         processing: response.documents.filter((doc: DocStatusResponse) => doc.status === 'processing'),
         pending: response.documents.filter((doc: DocStatusResponse) => doc.status === 'pending'),
         ready: response.documents.filter((doc: DocStatusResponse) => doc.status === 'ready'),
@@ -833,7 +875,7 @@ export default function DocumentManager() {
       setTimeout(() => {
         if (isMountedRef.current && currentTab === 'documents' && health) {
           // Restore intelligent polling interval based on document status
-          const hasActiveDocuments = (statusCounts.processing || 0) > 0 || (statusCounts.pending || 0) > 0;
+          const hasActiveDocuments = hasActiveDocumentsStatus(statusCounts);
           const normalInterval = hasActiveDocuments ? 5000 : 30000;
           startPollingInterval(normalInterval);
         }
@@ -857,6 +899,7 @@ export default function DocumentManager() {
     setPageByStatus({
       all: 1,
       processed: 1,
+      preprocessed: 1,
       processing: 1,
       pending: 1,
       failed: 1,
@@ -899,6 +942,7 @@ export default function DocumentManager() {
         const legacyDocs: DocsStatusesResponse = {
           statuses: {
             processed: response.documents.filter(doc => doc.status === 'processed'),
+            preprocessed: response.documents.filter(doc => doc.status === 'preprocessed'),
             processing: response.documents.filter(doc => doc.status === 'processing'),
             pending: response.documents.filter(doc => doc.status === 'pending'),
             ready: response.documents.filter((doc: DocStatusResponse) => doc.status === 'ready'),
@@ -935,14 +979,21 @@ export default function DocumentManager() {
         handleIntelligentRefresh();
 
         // Reset polling timer after intelligent refresh
-        const hasActiveDocuments = (statusCounts.processing || 0) > 0 || (statusCounts.pending || 0) > 0;
+        const hasActiveDocuments = hasActiveDocumentsStatus(statusCounts);
         const pollingInterval = hasActiveDocuments ? 5000 : 30000;
         startPollingInterval(pollingInterval);
       }
     }
     // Update the previous state
     prevPipelineBusyRef.current = pipelineBusy;
-  }, [pipelineBusy, currentTab, health, handleIntelligentRefresh, statusCounts.processing, statusCounts.pending, startPollingInterval]);
+  }, [
+    pipelineBusy,
+    currentTab,
+    health,
+    handleIntelligentRefresh,
+    statusCounts,
+    startPollingInterval
+  ]);
 
   // Set up intelligent polling with dynamic interval based on document status
   useEffect(() => {
@@ -952,7 +1003,7 @@ export default function DocumentManager() {
     }
 
     // Determine polling interval based on document status
-    const hasActiveDocuments = (statusCounts.processing || 0) > 0 || (statusCounts.pending || 0) > 0;
+    const hasActiveDocuments = hasActiveDocumentsStatus(statusCounts);
     const pollingInterval = hasActiveDocuments ? 5000 : 30000; // 5s if active, 30s if idle
 
     startPollingInterval(pollingInterval);
@@ -969,6 +1020,7 @@ export default function DocumentManager() {
     // Get new status counts
     const newStatusCounts = {
       processed: docs?.statuses?.processed?.length || 0,
+      preprocessed: docs?.statuses?.preprocessed?.length || 0,
       processing: docs?.statuses?.processing?.length || 0,
       handling: docs?.statuses?.handling?.length || 0,
       pending: docs?.statuses?.pending?.length || 0,
@@ -1191,11 +1243,23 @@ export default function DocumentManager() {
                     onClick={() => handleStatusFilterChange('processed')}
                     disabled={isRefreshing}
                     className={cn(
-                      (statusCounts.PROCESSED || statusCounts.processed || documentCounts.processed) > 0 ? 'text-green-600' : 'text-gray-500',
+                      processedCount > 0 ? 'text-green-600' : 'text-gray-500',
                       statusFilter === 'processed' && 'bg-green-100 dark:bg-green-900/30 font-medium border border-green-400 dark:border-green-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.completed')} ({statusCounts.PROCESSED || statusCounts.processed || 0})
+                    {t('documentPanel.documentManager.status.completed')} ({processedCount})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={statusFilter === 'preprocessed' ? 'secondary' : 'outline'}
+                    onClick={() => handleStatusFilterChange('preprocessed')}
+                    disabled={isRefreshing}
+                    className={cn(
+                      preprocessedCount > 0 ? 'text-purple-600' : 'text-gray-500',
+                      statusFilter === 'preprocessed' && 'bg-purple-100 dark:bg-purple-900/30 font-medium border border-purple-400 dark:border-purple-600 shadow-sm'
+                    )}
+                  >
+                    {t('documentPanel.documentManager.status.preprocessed')} ({preprocessedCount})
                   </Button>
                   <Button
                     size="sm"
@@ -1203,11 +1267,11 @@ export default function DocumentManager() {
                     onClick={() => handleStatusFilterChange('processing')}
                     disabled={isRefreshing}
                     className={cn(
-                      (statusCounts.PROCESSING || statusCounts.processing || documentCounts.processing) > 0 ? 'text-blue-600' : 'text-gray-500',
+                      processingCount > 0 ? 'text-blue-600' : 'text-gray-500',
                       statusFilter === 'processing' && 'bg-blue-100 dark:bg-blue-900/30 font-medium border border-blue-400 dark:border-blue-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.processing')} ({statusCounts.PROCESSING || statusCounts.processing || 0})
+                    {t('documentPanel.documentManager.status.processing')} ({processingCount})
                   </Button>
                   <Button
                     size="sm"
@@ -1226,11 +1290,11 @@ export default function DocumentManager() {
                     onClick={() => handleStatusFilterChange('pending')}
                     disabled={isRefreshing}
                     className={cn(
-                      (statusCounts.PENDING || statusCounts.pending || documentCounts.pending) > 0 ? 'text-yellow-600' : 'text-gray-500',
+                      pendingCount > 0 ? 'text-yellow-600' : 'text-gray-500',
                       statusFilter === 'pending' && 'bg-yellow-100 dark:bg-yellow-900/30 font-medium border border-yellow-400 dark:border-yellow-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.pending')} ({statusCounts.PENDING || statusCounts.pending || 0})
+                    {t('documentPanel.documentManager.status.pending')} ({pendingCount})
                   </Button>
                   <Button
                     size="sm"
@@ -1249,11 +1313,11 @@ export default function DocumentManager() {
                     onClick={() => handleStatusFilterChange('failed')}
                     disabled={isRefreshing}
                     className={cn(
-                      (statusCounts.FAILED || statusCounts.failed || documentCounts.failed) > 0 ? 'text-red-600' : 'text-gray-500',
+                      failedCount > 0 ? 'text-red-600' : 'text-gray-500',
                       statusFilter === 'failed' && 'bg-red-100 dark:bg-red-900/30 font-medium border border-red-400 dark:border-red-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.failed')} ({statusCounts.FAILED || statusCounts.failed || 0})
+                    {t('documentPanel.documentManager.status.failed')} ({failedCount})
                   </Button>
                 </div>
                 <Button
@@ -1403,6 +1467,9 @@ export default function DocumentManager() {
                               {doc.status === 'processed' && (
                                 <span className="text-green-600">{t('documentPanel.documentManager.status.completed')}</span>
                               )}
+                              {doc.status === 'preprocessed' && (
+                                <span className="text-purple-600">{t('documentPanel.documentManager.status.preprocessed')}</span>
+                              )}
                               {doc.status === 'processing' && (
                                 <span className="text-blue-600">{t('documentPanel.documentManager.status.processing')}</span>
                               )}
@@ -1427,13 +1494,16 @@ export default function DocumentManager() {
                               )}
 
                               {/* Tooltip rendering logic */}
-                              {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0)) && (
+                              {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0) || doc.track_id) && (
                                 <div className="invisible group-hover:visible tooltip">
-                                  {doc.error_msg && (
-                                    <pre>{doc.error_msg}</pre>
+                                  {doc.track_id && (
+                                    <div className="mt-1">Track ID: {doc.track_id}</div>
                                   )}
                                   {doc.metadata && Object.keys(doc.metadata).length > 0 && (
                                     <pre>{formatMetadata(doc.metadata)}</pre>
+                                  )}
+                                  {doc.error_msg && (
+                                    <pre>{doc.error_msg}</pre>
                                   )}
                                 </div>
                               )}

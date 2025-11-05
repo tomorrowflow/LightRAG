@@ -213,6 +213,55 @@ class ScanResponse(BaseModel):
         }
 
 
+class ReprocessResponse(BaseModel):
+    """Response model for reprocessing failed documents operation
+
+    Attributes:
+        status: Status of the reprocessing operation
+        message: Message describing the operation result
+        track_id: Tracking ID for monitoring reprocessing progress
+    """
+
+    status: Literal["reprocessing_started"] = Field(
+        description="Status of the reprocessing operation"
+    )
+    message: str = Field(description="Human-readable message describing the operation")
+    track_id: str = Field(
+        description="Tracking ID for monitoring reprocessing progress"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "reprocessing_started",
+                "message": "Reprocessing of failed documents has been initiated in background",
+                "track_id": "retry_20250729_170612_def456",
+            }
+        }
+
+
+class CancelPipelineResponse(BaseModel):
+    """Response model for pipeline cancellation operation
+
+    Attributes:
+        status: Status of the cancellation request
+        message: Message describing the operation result
+    """
+
+    status: Literal["cancellation_requested", "not_busy"] = Field(
+        description="Status of the cancellation request"
+    )
+    message: str = Field(description="Human-readable message describing the operation")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "cancellation_requested",
+                "message": "Pipeline cancellation has been requested. Documents will be marked as FAILED.",
+            }
+        }
+
+
 class InsertTextRequest(BaseModel):
     """Request model for inserting a single text document
 
@@ -388,6 +437,10 @@ class DeleteDocRequest(BaseModel):
         default=False,
         description="Whether to delete the corresponding file in the upload directory.",
     )
+    delete_llm_cache: bool = Field(
+        default=False,
+        description="Whether to delete cached LLM extraction results for the documents.",
+    )
 
     @field_validator("doc_ids", mode="after")
     @classmethod
@@ -466,7 +519,7 @@ class DocStatusResponse(BaseModel):
                 "scheme_name": "lightrag",
                 "multimodal_content": [],
                 "content_length": 15240,
-                "status": "PROCESSED",
+                "status": "processed",
                 "created_at": "2025-03-31T12:34:56",
                 "updated_at": "2025-03-31T12:35:30",
                 "track_id": "upload_20250729_170612_abc123",
@@ -501,7 +554,7 @@ class DocsStatusesResponse(BaseModel):
                             "scheme_name": "lightrag",
                             "multimodal_content": [],
                             "content_length": 5000,
-                            "status": "PENDING",
+                            "status": "pending",
                             "created_at": "2025-03-31T10:00:00",
                             "updated_at": "2025-03-31T10:00:00",
                             "track_id": "upload_20250331_100000_abc123",
@@ -511,6 +564,21 @@ class DocsStatusesResponse(BaseModel):
                             "file_path": "pending_doc.pdf",
                         }
                     ],
+                    "PREPROCESSED": [
+                        {
+                            "id": "doc_789",
+                            "content_summary": "Document pending final indexing",
+                            "content_length": 7200,
+                            "status": "preprocessed",
+                            "created_at": "2025-03-31T09:30:00",
+                            "updated_at": "2025-03-31T09:35:00",
+                            "track_id": "upload_20250331_093000_xyz789",
+                            "chunks_count": 10,
+                            "error": None,
+                            "metadata": None,
+                            "file_path": "preprocessed_doc.pdf",
+                        }
+                    ],
                     "PROCESSED": [
                         {
                             "id": "doc_456",
@@ -518,7 +586,7 @@ class DocsStatusesResponse(BaseModel):
                             "scheme_name": "lightrag",
                             "multimodal_content": [],
                             "content_length": 8000,
-                            "status": "PROCESSED",
+                            "status": "processed",
                             "created_at": "2025-03-31T09:00:00",
                             "updated_at": "2025-03-31T09:05:00",
                             "track_id": "insert_20250331_090000_def456",
@@ -690,6 +758,7 @@ class PaginatedDocsResponse(BaseModel):
                 "status_counts": {
                     "PENDING": 10,
                     "PROCESSING": 5,
+                    "PREPROCESSED": 5,
                     "PROCESSED": 130,
                     "FAILED": 5,
                 },
@@ -712,6 +781,7 @@ class StatusCountsResponse(BaseModel):
                 "status_counts": {
                     "PENDING": 10,
                     "PROCESSING": 5,
+                    "PREPROCESSED": 5,
                     "PROCESSED": 130,
                     "FAILED": 5,
                 }
@@ -834,6 +904,60 @@ class DocumentManager:
 
     def is_supported_file(self, filename: str) -> bool:
         return any(filename.lower().endswith(ext) for ext in self.supported_extensions)
+
+
+def validate_file_path_security(file_path_str: str, base_dir: Path) -> Optional[Path]:
+    """
+    Validate file path security to prevent Path Traversal attacks.
+
+    Args:
+        file_path_str: The file path string to validate
+        base_dir: The base directory that the file must be within
+
+    Returns:
+        Path: Safe file path if valid, None if unsafe or invalid
+    """
+    if not file_path_str or not file_path_str.strip():
+        return None
+
+    try:
+        # Clean the file path string
+        clean_path_str = file_path_str.strip()
+
+        # Check for obvious path traversal patterns before processing
+        # This catches both Unix (..) and Windows (..\) style traversals
+        if ".." in clean_path_str:
+            # Additional check for Windows-style backslash traversal
+            if (
+                "\\..\\" in clean_path_str
+                or clean_path_str.startswith("..\\")
+                or clean_path_str.endswith("\\..")
+            ):
+                # logger.warning(
+                #     f"Security violation: Windows path traversal attempt detected - {file_path_str}"
+                # )
+                return None
+
+        # Normalize path separators (convert backslashes to forward slashes)
+        # This helps handle Windows-style paths on Unix systems
+        normalized_path = clean_path_str.replace("\\", "/")
+
+        # Create path object and resolve it (handles symlinks and relative paths)
+        candidate_path = (base_dir / normalized_path).resolve()
+        base_dir_resolved = base_dir.resolve()
+
+        # Check if the resolved path is within the base directory
+        if not candidate_path.is_relative_to(base_dir_resolved):
+            # logger.warning(
+            #     f"Security violation: Path traversal attempt detected - {file_path_str}"
+            # )
+            return None
+
+        return candidate_path
+
+    except (OSError, ValueError, Exception) as e:
+        logger.warning(f"Invalid file path detected: {file_path_str} - {str(e)}")
+        return None
 
 
 def get_unique_filename_in_enqueued(target_dir: Path, original_name: str) -> str:
@@ -1052,11 +1176,74 @@ async def pipeline_enqueue_file(
                         else:
                             if not pm.is_installed("pypdf2"):  # type: ignore
                                 pm.install("pypdf2")
+                            if not pm.is_installed("pycryptodome"):  # type: ignore
+                                pm.install("pycryptodome")
                             from PyPDF2 import PdfReader  # type: ignore
                             from io import BytesIO
 
                             pdf_file = BytesIO(file)
                             reader = PdfReader(pdf_file)
+
+                            # Check if PDF is encrypted
+                            if reader.is_encrypted:
+                                pdf_password = global_args.pdf_decrypt_password
+                                if not pdf_password:
+                                    # PDF is encrypted but no password provided
+                                    error_files = [
+                                        {
+                                            "file_path": str(file_path.name),
+                                            "error_description": "[File Extraction]PDF is encrypted but no password provided",
+                                            "original_error": "Please set PDF_DECRYPT_PASSWORD environment variable to decrypt this PDF file",
+                                            "file_size": file_size,
+                                        }
+                                    ]
+                                    await rag.apipeline_enqueue_error_documents(
+                                        error_files, track_id
+                                    )
+                                    logger.error(
+                                        f"[File Extraction]PDF is encrypted but no password provided: {file_path.name}"
+                                    )
+                                    return False, track_id
+
+                                # Try to decrypt with password
+                                try:
+                                    decrypt_result = reader.decrypt(pdf_password)
+                                    if decrypt_result == 0:
+                                        # Password is incorrect
+                                        error_files = [
+                                            {
+                                                "file_path": str(file_path.name),
+                                                "error_description": "[File Extraction]Failed to decrypt PDF - incorrect password",
+                                                "original_error": "The provided PDF_DECRYPT_PASSWORD is incorrect for this file",
+                                                "file_size": file_size,
+                                            }
+                                        ]
+                                        await rag.apipeline_enqueue_error_documents(
+                                            error_files, track_id
+                                        )
+                                        logger.error(
+                                            f"[File Extraction]Incorrect PDF password: {file_path.name}"
+                                        )
+                                        return False, track_id
+                                except Exception as decrypt_error:
+                                    # Decryption process error
+                                    error_files = [
+                                        {
+                                            "file_path": str(file_path.name),
+                                            "error_description": "[File Extraction]PDF decryption failed",
+                                            "original_error": f"Error during PDF decryption: {str(decrypt_error)}",
+                                            "file_size": file_size,
+                                        }
+                                    ]
+                                    await rag.apipeline_enqueue_error_documents(
+                                        error_files, track_id
+                                    )
+                                    logger.error(
+                                        f"[File Extraction]PDF decryption error for {file_path.name}: {str(decrypt_error)}"
+                                    )
+                                    return False, track_id
+
+                            # Extract text from PDF (encrypted PDFs are now decrypted, unencrypted PDFs proceed directly)
                             for page in reader.pages:
                                 content += page.extract_text() + "\n"
                     except Exception as e:
@@ -1517,7 +1704,7 @@ async def run_scanning_process(
         modelSource = schemeConfig.modelSource
 
         if new_files:
-            # Process all files at once with track_id
+            # Check pipeline busy status before processing
             if is_pipeline_busy:
                 logger.info(
                     "Pipe is currently busy, skipping processing to avoid conflicts..."
@@ -1528,23 +1715,56 @@ async def run_scanning_process(
                     "Pipe is currently busy, skipping processing to avoid conflicts..."
                 )
                 return
-            if scheme_name == "lightrag":
-                await pipeline_index_files(
-                    rag, new_files, track_id, scheme_name=scheme_name
-                )
+            
+            # Check for files with PROCESSED status and filter them out
+            valid_files = []
+            processed_files = []
+
+            for file_path in new_files:
+                filename = file_path.name
+                existing_doc_data = await rag.doc_status.get_doc_by_file_path(filename)
+
+                if existing_doc_data and existing_doc_data.get("status") == "processed":
+                    # File is already PROCESSED, skip it with warning
+                    processed_files.append(filename)
+                    logger.warning(f"Skipping already processed file: {filename}")
+                else:
+                    # File is new or in non-PROCESSED status, add to processing list
+                    valid_files.append(file_path)
+
+            # Process valid files (new files + non-PROCESSED status files)
+            if valid_files:
+                if scheme_name == "lightrag":
+                    await pipeline_index_files(
+                        rag, valid_files, track_id, scheme_name=scheme_name
+                    )
+                    if processed_files:
+                        logger.info(
+                            f"Scanning process completed with lightrag: {len(valid_files)} files Processed, {len(processed_files)} skipped."
+                        )
+                    else:
+                        logger.info(
+                            f"Scanning process completed with lightrag: {len(valid_files)} files Processed."
+                        )
+                elif scheme_name == "raganything":
+                    await pipeline_index_files_raganything(
+                        rag_anything,
+                        valid_files,
+                        scheme_name=scheme_name,
+                        parser=extractor,
+                        source=modelSource,
+                    )
+                    if processed_files:
+                        logger.info(
+                            f"Scanning process completed with raganything: {len(valid_files)} files Processed, {len(processed_files)} skipped."
+                        )
+                    else:
+                        logger.info(
+                            f"Scanning process completed with raganything: {len(valid_files)} files Processed."
+                        )
+            else:
                 logger.info(
-                    f"Scanning process completed with lightrag: {total_files} files Processed."
-                )
-            elif scheme_name == "raganything":
-                await pipeline_index_files_raganything(
-                    rag_anything,
-                    new_files,
-                    scheme_name=scheme_name,
-                    parser=extractor,
-                    source=modelSource,
-                )
-                logger.info(
-                    f"Scanning process completed with raganything: {total_files} files Processed."
+                    "No files to process after filtering already processed files."
                 )
         else:
             # No new files to index, check if there are any documents in the queue
@@ -1563,6 +1783,7 @@ async def background_delete_documents(
     doc_manager: DocumentManager,
     doc_ids: List[str],
     delete_file: bool = False,
+    delete_llm_cache: bool = False,
 ):
     """Background task to delete multiple documents"""
     from lightrag.kg.shared_storage import (
@@ -1597,11 +1818,27 @@ async def background_delete_documents(
         )
         # Use slice assignment to clear the list in place
         pipeline_status["history_messages"][:] = ["Starting document deletion process"]
+        if delete_llm_cache:
+            pipeline_status["history_messages"].append(
+                "LLM cache cleanup requested for this deletion job"
+            )
 
     try:
         # Loop through each document ID and delete them one by one
         for i, doc_id in enumerate(doc_ids, 1):
+            # Check for cancellation at the start of each document deletion
             async with pipeline_status_lock:
+                if pipeline_status.get("cancellation_requested", False):
+                    cancel_msg = f"Deletion cancelled by user at document {i}/{total_docs}. {len(successful_deletions)} deleted, {total_docs - i + 1} remaining."
+                    logger.info(cancel_msg)
+                    pipeline_status["latest_message"] = cancel_msg
+                    pipeline_status["history_messages"].append(cancel_msg)
+                    # Add remaining documents to failed list with cancellation reason
+                    failed_deletions.extend(
+                        doc_ids[i - 1 :]
+                    )  # i-1 because enumerate starts at 1
+                    break  # Exit the loop, remaining documents unchanged
+
                 start_msg = f"Deleting document {i}/{total_docs}: {doc_id}"
                 logger.info(start_msg)
                 pipeline_status["cur_batch"] = i
@@ -1610,7 +1847,9 @@ async def background_delete_documents(
 
             file_path = "#"
             try:
-                result = await rag.adelete_by_doc_id(doc_id)
+                result = await rag.adelete_by_doc_id(
+                    doc_id, delete_llm_cache=delete_llm_cache
+                )
                 file_path = (
                     getattr(result, "file_path", "-") if "result" in locals() else "-"
                 )
@@ -1631,51 +1870,37 @@ async def background_delete_documents(
                     ):
                         try:
                             deleted_files = []
-                            # check and delete files from input_dir directory
-                            file_path = doc_manager.input_dir / result.file_path
-                            if file_path.exists():
-                                try:
-                                    file_path.unlink()
-                                    deleted_files.append(file_path.name)
-                                    file_delete_msg = f"Successfully deleted input_dir file: {result.file_path}"
-                                    logger.info(file_delete_msg)
-                                    async with pipeline_status_lock:
-                                        pipeline_status["latest_message"] = (
-                                            file_delete_msg
-                                        )
-                                        pipeline_status["history_messages"].append(
-                                            file_delete_msg
-                                        )
-                                except Exception as file_error:
-                                    file_error_msg = f"Failed to delete input_dir file {result.file_path}: {str(file_error)}"
-                                    logger.debug(file_error_msg)
-                                    async with pipeline_status_lock:
-                                        pipeline_status["latest_message"] = (
-                                            file_error_msg
-                                        )
-                                        pipeline_status["history_messages"].append(
-                                            file_error_msg
-                                        )
+                            # SECURITY FIX: Use secure path validation to prevent arbitrary file deletion
+                            safe_file_path = validate_file_path_security(
+                                result.file_path, doc_manager.input_dir
+                            )
 
-                            # Also check and delete files from __enqueued__ directory
-                            enqueued_dir = doc_manager.input_dir / "__enqueued__"
-                            if enqueued_dir.exists():
-                                # Look for files with the same name or similar names (with numeric suffixes)
-                                base_name = Path(result.file_path).stem
-                                extension = Path(result.file_path).suffix
-
-                                # Search for exact match and files with numeric suffixes
-                                for enqueued_file in enqueued_dir.glob(
-                                    f"{base_name}*{extension}"
-                                ):
+                            if safe_file_path is None:
+                                # Security violation detected - log and skip file deletion
+                                security_msg = f"Security violation: Unsafe file path detected for deletion - {result.file_path}"
+                                logger.warning(security_msg)
+                                async with pipeline_status_lock:
+                                    pipeline_status["latest_message"] = security_msg
+                                    pipeline_status["history_messages"].append(
+                                        security_msg
+                                    )
+                            else:
+                                # check and delete files from input_dir directory
+                                if safe_file_path.exists():
                                     try:
-                                        enqueued_file.unlink()
-                                        deleted_files.append(enqueued_file.name)
-                                        logger.info(
-                                            f"Successfully deleted enqueued file: {enqueued_file.name}"
-                                        )
-                                    except Exception as enqueued_error:
-                                        file_error_msg = f"Failed to delete enqueued file {enqueued_file.name}: {str(enqueued_error)}"
+                                        safe_file_path.unlink()
+                                        deleted_files.append(safe_file_path.name)
+                                        file_delete_msg = f"Successfully deleted input_dir file: {result.file_path}"
+                                        logger.info(file_delete_msg)
+                                        async with pipeline_status_lock:
+                                            pipeline_status["latest_message"] = (
+                                                file_delete_msg
+                                            )
+                                            pipeline_status["history_messages"].append(
+                                                file_delete_msg
+                                            )
+                                    except Exception as file_error:
+                                        file_error_msg = f"Failed to delete input_dir file {result.file_path}: {str(file_error)}"
                                         logger.debug(file_error_msg)
                                         async with pipeline_status_lock:
                                             pipeline_status["latest_message"] = (
@@ -1685,8 +1910,47 @@ async def background_delete_documents(
                                                 file_error_msg
                                             )
 
+                                # Also check and delete files from __enqueued__ directory
+                                enqueued_dir = doc_manager.input_dir / "__enqueued__"
+                                if enqueued_dir.exists():
+                                    # SECURITY FIX: Validate that the file path is safe before processing
+                                    # Only proceed if the original path validation passed
+                                    base_name = Path(result.file_path).stem
+                                    extension = Path(result.file_path).suffix
+
+                                    # Search for exact match and files with numeric suffixes
+                                    for enqueued_file in enqueued_dir.glob(
+                                        f"{base_name}*{extension}"
+                                    ):
+                                        # Additional security check: ensure enqueued file is within enqueued directory
+                                        safe_enqueued_path = (
+                                            validate_file_path_security(
+                                                enqueued_file.name, enqueued_dir
+                                            )
+                                        )
+                                        if safe_enqueued_path is not None:
+                                            try:
+                                                enqueued_file.unlink()
+                                                deleted_files.append(enqueued_file.name)
+                                                logger.info(
+                                                    f"Successfully deleted enqueued file: {enqueued_file.name}"
+                                                )
+                                            except Exception as enqueued_error:
+                                                file_error_msg = f"Failed to delete enqueued file {enqueued_file.name}: {str(enqueued_error)}"
+                                                logger.debug(file_error_msg)
+                                                async with pipeline_status_lock:
+                                                    pipeline_status[
+                                                        "latest_message"
+                                                    ] = file_error_msg
+                                                    pipeline_status[
+                                                        "history_messages"
+                                                    ].append(file_error_msg)
+                                        else:
+                                            security_msg = f"Security violation: Unsafe enqueued file path detected - {enqueued_file.name}"
+                                            logger.warning(security_msg)
+
                             if deleted_files == []:
-                                file_error_msg = f"File deletion skipped, missing file: {result.file_path}"
+                                file_error_msg = f"File deletion skipped, missing or unsafe file: {result.file_path}"
                                 logger.warning(file_error_msg)
                                 async with pipeline_status_lock:
                                     pipeline_status["latest_message"] = file_error_msg
@@ -1737,6 +2001,10 @@ async def background_delete_documents(
         # Final summary and check for pending requests
         async with pipeline_status_lock:
             pipeline_status["busy"] = False
+            pipeline_status["pending_requests"] = False  # Reset pending requests flag
+            pipeline_status["cancellation_requested"] = (
+                False  # Always reset cancellation flag
+            )
             completion_msg = f"Deletion completed: {len(successful_deletions)} successful, {len(failed_deletions)} failed"
             pipeline_status["latest_message"] = completion_msg
             pipeline_status["history_messages"].append(completion_msg)
@@ -2066,8 +2334,19 @@ def create_document_routes(
                     detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
                 )
 
+            # Check if filename already exists in doc_status storage
+            existing_doc_data = await rag.doc_status.get_doc_by_file_path(safe_filename)
+            if existing_doc_data:
+                # Get document status information for error message
+                status = existing_doc_data.get("status", "unknown")
+                return InsertResponse(
+                    status="duplicated",
+                    message=f"File '{safe_filename}' already exists in document storage (Status: {status}).",
+                    track_id="",
+                )
+
             file_path = doc_manager.input_dir / safe_filename
-            # Check if file already exists
+            # Check if file already exists in file system
             if file_path.exists():
                 return InsertResponse(
                     status="duplicated",
@@ -2171,6 +2450,24 @@ def create_document_routes(
             HTTPException: If an error occurs during text processing (500).
         """
         try:
+            # Check if file_source already exists in doc_status storage
+            if (
+                request.file_source
+                and request.file_source.strip()
+                and request.file_source != "unknown_source"
+            ):
+                existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+                    request.file_source
+                )
+                if existing_doc_data:
+                    # Get document status information for error message
+                    status = existing_doc_data.get("status", "unknown")
+                    return InsertResponse(
+                        status="duplicated",
+                        message=f"File source '{request.file_source}' already exists in document storage (Status: {status}).",
+                        track_id="",
+                    )
+
             # Generate track_id for text insertion
             track_id = generate_track_id("insert")
 
@@ -2217,6 +2514,26 @@ def create_document_routes(
             HTTPException: If an error occurs during text processing (500).
         """
         try:
+            # Check if any file_sources already exist in doc_status storage
+            if request.file_sources:
+                for file_source in request.file_sources:
+                    if (
+                        file_source
+                        and file_source.strip()
+                        and file_source != "unknown_source"
+                    ):
+                        existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+                            file_source
+                        )
+                        if existing_doc_data:
+                            # Get document status information for error message
+                            status = existing_doc_data.get("status", "unknown")
+                            return InsertResponse(
+                                status="duplicated",
+                                message=f"File source '{file_source}' already exists in document storage (Status: {status}).",
+                                track_id="",
+                            )
+
             # Generate track_id for texts insertion
             track_id = generate_track_id("insert")
 
@@ -2305,6 +2622,8 @@ def create_document_routes(
                 rag.full_docs,
                 rag.full_entities,
                 rag.full_relations,
+                rag.entity_chunks,
+                rag.relation_chunks,
                 rag.entities_vdb,
                 rag.relationships_vdb,
                 rag.chunks_vdb,
@@ -2555,20 +2874,24 @@ def create_document_routes(
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
 
+    # TODO: Deprecated, use /documents/paginated instead
     @router.get(
         "", response_model=DocsStatusesResponse, dependencies=[Depends(combined_auth)]
     )
     async def documents() -> DocsStatusesResponse:
         """
-        Get the status of all documents in the system.
+        Get the status of all documents in the system. This endpoint is deprecated; use /documents/paginated instead.
+        To prevent excessive resource consumption, a maximum of 1,000 records is returned.
 
         This endpoint retrieves the current status of all documents, grouped by their
-        processing status (READY, HANDLING, PENDING, PROCESSING, PROCESSED, FAILED).
+        processing status (PENDING, PROCESSING, PREPROCESSED, PROCESSED, FAILED). The results are
+        limited to 1000 total documents with fair distribution across all statuses.
 
         Returns:
             DocsStatusesResponse: A response object containing a dictionary where keys are
                                 DocStatus values and values are lists of DocStatusResponse
                                 objects representing documents in each status category.
+                                Maximum 1000 documents total will be returned.
 
         Raises:
             HTTPException: If an error occurs while retrieving document statuses (500).
@@ -2579,6 +2902,7 @@ def create_document_routes(
                 DocStatus.HANDLING,
                 DocStatus.PENDING,
                 DocStatus.PROCESSING,
+                DocStatus.PREPROCESSED,
                 DocStatus.PROCESSED,
                 DocStatus.FAILED,
             )
@@ -2587,12 +2911,45 @@ def create_document_routes(
             results: List[Dict[str, DocProcessingStatus]] = await asyncio.gather(*tasks)
 
             response = DocsStatusesResponse()
+            total_documents = 0
+            max_documents = 1000
 
+            # Convert results to lists for easier processing
+            status_documents = []
             for idx, result in enumerate(results):
                 status = statuses[idx]
+                docs_list = []
                 for doc_id, doc_status in result.items():
+                    docs_list.append((doc_id, doc_status))
+                status_documents.append((status, docs_list))
+
+            # Fair distribution: round-robin across statuses
+            status_indices = [0] * len(
+                status_documents
+            )  # Track current index for each status
+            current_status_idx = 0
+
+            while total_documents < max_documents:
+                # Check if we have any documents left to process
+                has_remaining = False
+                for status_idx, (status, docs_list) in enumerate(status_documents):
+                    if status_indices[status_idx] < len(docs_list):
+                        has_remaining = True
+                        break
+
+                if not has_remaining:
+                    break
+
+                # Try to get a document from the current status
+                status, docs_list = status_documents[current_status_idx]
+                current_index = status_indices[current_status_idx]
+
+                if current_index < len(docs_list):
+                    doc_id, doc_status = docs_list[current_index]
+
                     if status not in response.statuses:
                         response.statuses[status] = []
+
                     response.statuses[status].append(
                         DocStatusResponse(
                             id=doc_id,
@@ -2610,6 +2967,13 @@ def create_document_routes(
                             scheme_name=doc_status.scheme_name,
                         )
                     )
+
+                    status_indices[current_status_idx] += 1
+                    total_documents += 1
+
+                # Move to next status (round-robin)
+                current_status_idx = (current_status_idx + 1) % len(status_documents)
+
             return response
         except Exception as e:
             logger.error(f"Error GET /documents: {str(e)}")
@@ -2639,36 +3003,26 @@ def create_document_routes(
         Delete documents and all their associated data by their IDs using background processing.
 
         Deletes specific documents and all their associated data, including their status,
-        text chunks, vector embeddings, and any related graph data.
+        text chunks, vector embeddings, and any related graph data. When requested,
+        cached LLM extraction responses are removed after graph deletion/rebuild completes.
         The deletion process runs in the background to avoid blocking the client connection.
-        It is disabled when llm cache for entity extraction is disabled.
 
         This operation is irreversible and will interact with the pipeline status.
 
         Args:
-            delete_request (DeleteDocRequest): The request containing the document IDs and delete_file options.
+            delete_request (DeleteDocRequest): The request containing the document IDs and deletion options.
             background_tasks: FastAPI BackgroundTasks for async processing
 
         Returns:
             DeleteDocByIdResponse: The result of the deletion operation.
                 - status="deletion_started": The document deletion has been initiated in the background.
                 - status="busy": The pipeline is busy with another operation.
-                - status="not_allowed": Operation not allowed when LLM cache for entity extraction is disabled.
 
         Raises:
             HTTPException:
               - 500: If an unexpected internal error occurs during initialization.
         """
         doc_ids = delete_request.doc_ids
-
-        # The rag object is initialized from the server startup args,
-        # so we can access its properties here.
-        if not rag.enable_llm_cache_for_entity_extract:
-            return DeleteDocByIdResponse(
-                status="not_allowed",
-                message="Operation not allowed when LLM cache for entity extraction is disabled.",
-                doc_id=", ".join(delete_request.doc_ids),
-            )
 
         try:
             from lightrag.kg.shared_storage import get_namespace_data
@@ -2690,6 +3044,7 @@ def create_document_routes(
                 doc_manager,
                 doc_ids,
                 delete_request.delete_file,
+                delete_request.delete_llm_cache,
             )
 
             return DeleteDocByIdResponse(
@@ -2998,6 +3353,113 @@ def create_document_routes(
 
         except Exception as e:
             logger.error(f"Error getting document status counts: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post(
+        "/reprocess_failed",
+        response_model=ReprocessResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def reprocess_failed_documents(background_tasks: BackgroundTasks):
+        """
+        Reprocess failed and pending documents.
+
+        This endpoint triggers the document processing pipeline which automatically
+        picks up and reprocesses documents in the following statuses:
+        - FAILED: Documents that failed during previous processing attempts
+        - PENDING: Documents waiting to be processed
+        - PROCESSING: Documents with abnormally terminated processing (e.g., server crashes)
+
+        This is useful for recovering from server crashes, network errors, LLM service
+        outages, or other temporary failures that caused document processing to fail.
+
+        The processing happens in the background and can be monitored using the
+        returned track_id or by checking the pipeline status.
+
+        Returns:
+            ReprocessResponse: Response with status, message, and track_id
+
+        Raises:
+            HTTPException: If an error occurs while initiating reprocessing (500).
+        """
+        try:
+            # Generate track_id with "retry" prefix for retry operation
+            track_id = generate_track_id("retry")
+
+            # Start the reprocessing in the background
+            background_tasks.add_task(rag.apipeline_process_enqueue_documents)
+            logger.info(
+                f"Reprocessing of failed documents initiated with track_id: {track_id}"
+            )
+
+            return ReprocessResponse(
+                status="reprocessing_started",
+                message="Reprocessing of failed documents has been initiated in background",
+                track_id=track_id,
+            )
+
+        except Exception as e:
+            logger.error(f"Error initiating reprocessing of failed documents: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post(
+        "/cancel_pipeline",
+        response_model=CancelPipelineResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def cancel_pipeline():
+        """
+        Request cancellation of the currently running pipeline.
+
+        This endpoint sets a cancellation flag in the pipeline status. The pipeline will:
+        1. Check this flag at key processing points
+        2. Stop processing new documents
+        3. Cancel all running document processing tasks
+        4. Mark all PROCESSING documents as FAILED with reason "User cancelled"
+
+        The cancellation is graceful and ensures data consistency. Documents that have
+        completed processing will remain in PROCESSED status.
+
+        Returns:
+            CancelPipelineResponse: Response with status and message
+                - status="cancellation_requested": Cancellation flag has been set
+                - status="not_busy": Pipeline is not currently running
+
+        Raises:
+            HTTPException: If an error occurs while setting cancellation flag (500).
+        """
+        try:
+            from lightrag.kg.shared_storage import (
+                get_namespace_data,
+                get_pipeline_status_lock,
+            )
+
+            pipeline_status = await get_namespace_data("pipeline_status")
+            pipeline_status_lock = get_pipeline_status_lock()
+
+            async with pipeline_status_lock:
+                if not pipeline_status.get("busy", False):
+                    return CancelPipelineResponse(
+                        status="not_busy",
+                        message="Pipeline is not currently running. No cancellation needed.",
+                    )
+
+                # Set cancellation flag
+                pipeline_status["cancellation_requested"] = True
+                cancel_msg = "Pipeline cancellation requested by user"
+                logger.info(cancel_msg)
+                pipeline_status["latest_message"] = cancel_msg
+                pipeline_status["history_messages"].append(cancel_msg)
+
+            return CancelPipelineResponse(
+                status="cancellation_requested",
+                message="Pipeline cancellation has been requested. Documents will be marked as FAILED.",
+            )
+
+        except Exception as e:
+            logger.error(f"Error requesting pipeline cancellation: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
 

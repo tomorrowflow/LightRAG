@@ -72,15 +72,17 @@ class JsonDocStatusStorage(DocStatusStorage):
             return set(keys) - set(self._data.keys())
 
     async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
+        ordered_results: list[dict[str, Any] | None] = []
         if self._storage_lock is None:
             raise StorageNotInitializedError("JsonDocStatusStorage")
         async with self._storage_lock:
             for id in ids:
                 data = self._data.get(id, None)
                 if data:
-                    result.append(data)
-        return result
+                    ordered_results.append(data.copy())
+                else:
+                    ordered_results.append(None)
+        return ordered_results
 
     async def get_status_counts(self) -> dict[str, int]:
         """Get counts of documents in each status"""
@@ -184,6 +186,20 @@ class JsonDocStatusStorage(DocStatusStorage):
             await set_all_update_flags(self.final_namespace)
 
         await self.index_done_callback()
+
+    async def is_empty(self) -> bool:
+        """Check if the storage is empty
+
+        Returns:
+            bool: True if storage is empty, False otherwise
+
+        Raises:
+            StorageNotInitializedError: If storage is not initialized
+        """
+        if self._storage_lock is None:
+            raise StorageNotInitializedError("JsonDocStatusStorage")
+        async with self._storage_lock:
+            return len(self._data) == 0
 
     async def get_by_id(self, id: str) -> Union[dict[str, Any], None]:
         async with self._storage_lock:
@@ -322,6 +338,27 @@ class JsonDocStatusStorage(DocStatusStorage):
 
             if any_deleted:
                 await set_all_update_flags(self.final_namespace)
+
+    async def get_doc_by_file_path(self, file_path: str) -> Union[dict[str, Any], None]:
+        """Get document by file path
+
+        Args:
+            file_path: The file path to search for
+
+        Returns:
+            Union[dict[str, Any], None]: Document data if found, None otherwise
+            Returns the same format as get_by_ids method
+        """
+        if self._storage_lock is None:
+            raise StorageNotInitializedError("JsonDocStatusStorage")
+
+        async with self._storage_lock:
+            for doc_id, doc_data in self._data.items():
+                if doc_data.get("file_path") == file_path:
+                    # Return complete document data, consistent with get_by_ids method
+                    return doc_data
+
+        return None
 
     async def drop(self) -> dict[str, str]:
         """Drop all document status data from storage and clean up resources

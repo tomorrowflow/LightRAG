@@ -304,51 +304,6 @@ class RedisKVStorage(BaseKVStorage):
                 logger.error(f"[{self.workspace}] JSON decode error in batch get: {e}")
                 return [None] * len(ids)
 
-    async def get_all(self) -> dict[str, Any]:
-        """Get all data from storage
-
-        Returns:
-            Dictionary containing all stored data
-        """
-        async with self._get_redis_connection() as redis:
-            try:
-                # Get all keys for this namespace
-                keys = await redis.keys(f"{self.final_namespace}:*")
-
-                if not keys:
-                    return {}
-
-                # Get all values in batch
-                pipe = redis.pipeline()
-                for key in keys:
-                    pipe.get(key)
-                values = await pipe.execute()
-
-                # Build result dictionary
-                result = {}
-                for key, value in zip(keys, values):
-                    if value:
-                        # Extract the ID part (after namespace:)
-                        key_id = key.split(":", 1)[1]
-                        try:
-                            data = json.loads(value)
-                            # Ensure time fields are present for all documents
-                            data.setdefault("create_time", 0)
-                            data.setdefault("update_time", 0)
-                            result[key_id] = data
-                        except json.JSONDecodeError as e:
-                            logger.error(
-                                f"[{self.workspace}] JSON decode error for key {key}: {e}"
-                            )
-                            continue
-
-                return result
-            except Exception as e:
-                logger.error(
-                    f"[{self.workspace}] Error getting all data from Redis: {e}"
-                )
-                return {}
-
     async def filter_keys(self, keys: set[str]) -> set[str]:
         async with self._get_redis_connection() as redis:
             pipe = redis.pipeline()
@@ -407,8 +362,25 @@ class RedisKVStorage(BaseKVStorage):
         # Redis handles persistence automatically
         pass
 
+    async def is_empty(self) -> bool:
+        """Check if the storage is empty for the current workspace and namespace
+
+        Returns:
+            bool: True if storage is empty, False otherwise
+        """
+        pattern = f"{self.final_namespace}:*"
+        try:
+            async with self._get_redis_connection() as redis:
+                # Use scan to check if any keys exist
+                async for key in redis.scan_iter(match=pattern, count=1):
+                    return False  # Found at least one key
+                return True  # No keys found
+        except Exception as e:
+            logger.error(f"[{self.workspace}] Error checking if storage is empty: {e}")
+            return True
+
     async def delete(self, ids: list[str]) -> None:
-        """Delete entries with specified IDs"""
+        """Delete specific records from storage by their IDs"""
         if not ids:
             return
 
@@ -693,7 +665,7 @@ class RedisDocStatusStorage(DocStatusStorage):
             return set(keys) - existing_ids
 
     async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
+        ordered_results: list[dict[str, Any] | None] = []
         async with self._get_redis_connection() as redis:
             try:
                 pipe = redis.pipeline()
@@ -704,15 +676,17 @@ class RedisDocStatusStorage(DocStatusStorage):
                 for result_data in results:
                     if result_data:
                         try:
-                            result.append(json.loads(result_data))
+                            ordered_results.append(json.loads(result_data))
                         except json.JSONDecodeError as e:
                             logger.error(
                                 f"[{self.workspace}] JSON decode error in get_by_ids: {e}"
                             )
-                            continue
+                            ordered_results.append(None)
+                    else:
+                        ordered_results.append(None)
             except Exception as e:
                 logger.error(f"[{self.workspace}] Error in get_by_ids: {e}")
-        return result
+        return ordered_results
 
     async def get_status_counts(self) -> dict[str, int]:
         """Get counts of documents in each status"""
@@ -865,6 +839,23 @@ class RedisDocStatusStorage(DocStatusStorage):
     async def index_done_callback(self) -> None:
         """Redis handles persistence automatically"""
         pass
+
+    async def is_empty(self) -> bool:
+        """Check if the storage is empty for the current workspace and namespace
+
+        Returns:
+            bool: True if storage is empty, False otherwise
+        """
+        pattern = f"{self.final_namespace}:*"
+        try:
+            async with self._get_redis_connection() as redis:
+                # Use scan to check if any keys exist
+                async for key in redis.scan_iter(match=pattern, count=1):
+                    return False  # Found at least one key
+                return True  # No keys found
+        except Exception as e:
+            logger.error(f"[{self.workspace}] Error checking if storage is empty: {e}")
+            return True
 
     @redis_retry
     async def upsert(self, data: dict[str, dict[str, Any]]) -> None:
@@ -1051,6 +1042,52 @@ class RedisDocStatusStorage(DocStatusStorage):
         counts["all"] = total_count
 
         return counts
+
+    async def get_doc_by_file_path(self, file_path: str) -> Union[dict[str, Any], None]:
+        """Get document by file path
+
+        Args:
+            file_path: The file path to search for
+
+        Returns:
+            Union[dict[str, Any], None]: Document data if found, None otherwise
+            Returns the same format as get_by_id method
+        """
+        async with self._get_redis_connection() as redis:
+            try:
+                # Use SCAN to iterate through all keys in the namespace
+                cursor = 0
+                while True:
+                    cursor, keys = await redis.scan(
+                        cursor, match=f"{self.final_namespace}:*", count=1000
+                    )
+                    if keys:
+                        # Get all values in batch
+                        pipe = redis.pipeline()
+                        for key in keys:
+                            pipe.get(key)
+                        values = await pipe.execute()
+
+                        # Check each document for matching file_path
+                        for value in values:
+                            if value:
+                                try:
+                                    doc_data = json.loads(value)
+                                    if doc_data.get("file_path") == file_path:
+                                        return doc_data
+                                except json.JSONDecodeError as e:
+                                    logger.error(
+                                        f"[{self.workspace}] JSON decode error in get_doc_by_file_path: {e}"
+                                    )
+                                    continue
+
+                    if cursor == 0:
+                        break
+
+                return None
+            except Exception as e:
+                logger.error(f"[{self.workspace}] Error in get_doc_by_file_path: {e}")
+                return None
 
     async def drop(self) -> dict[str, str]:
         """Drop all document status data from storage and clean up resources"""

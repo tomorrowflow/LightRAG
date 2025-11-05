@@ -2,12 +2,16 @@
 LightRAG FastAPI Server
 """
 
-from fastapi import FastAPI, Depends, HTTPException
-import asyncio
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.openapi.docs import (
+    get_swagger_ui_html,
+    get_swagger_ui_oauth2_redirect_html,
+)
 import os
 import logging
 import logging.config
-import signal
 import sys
 import uvicorn
 import pipmaster as pm
@@ -46,7 +50,6 @@ from lightrag.constants import (
 from lightrag.api.routers.document_routes import (
     DocumentManager,
     create_document_routes,
-    run_scanning_process,
 )
 from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
@@ -55,7 +58,6 @@ from lightrag.api.routers.ollama_api import OllamaAPI
 from lightrag.utils import logger, set_verbose_debug
 from lightrag.kg.shared_storage import (
     get_namespace_data,
-    get_pipeline_status_lock,
     initialize_pipeline_status,
     cleanup_keyed_lock,
     finalize_share_data,
@@ -80,24 +82,6 @@ config.read("config.ini")
 
 # Global authentication configuration
 auth_configured = bool(auth_handler.accounts)
-
-
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown"""
-
-    def signal_handler(sig, frame):
-        print(f"\n\nReceived signal {sig}, shutting down gracefully...")
-        print(f"Process ID: {os.getpid()}")
-
-        # Release shared resources
-        finalize_share_data()
-
-        # Exit with success status
-        sys.exit(0)
-
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # kill command
 
 
 class LLMConfigCache:
@@ -149,7 +133,141 @@ class LLMConfigCache:
                 self.ollama_embedding_options = {}
 
 
+def check_frontend_build():
+    """Check if frontend is built and optionally check if source is up-to-date
+
+    Returns:
+        bool: True if frontend is outdated, False if up-to-date or production environment
+    """
+    webui_dir = Path(__file__).parent / "webui"
+    index_html = webui_dir / "index.html"
+
+    # 1. Check if build files exist (required)
+    if not index_html.exists():
+        ASCIIColors.red("\n" + "=" * 80)
+        ASCIIColors.red("ERROR: Frontend Not Built")
+        ASCIIColors.red("=" * 80)
+        ASCIIColors.yellow("The WebUI frontend has not been built yet.")
+        ASCIIColors.yellow(
+            "Please build the frontend code first using the following commands:\n"
+        )
+        ASCIIColors.cyan("    cd lightrag_webui")
+        ASCIIColors.cyan("    bun install --frozen-lockfile")
+        ASCIIColors.cyan("    bun run build")
+        ASCIIColors.cyan("    cd ..")
+        ASCIIColors.yellow("\nThen restart the service.\n")
+        ASCIIColors.cyan(
+            "Note: Make sure you have Bun installed. Visit https://bun.sh for installation."
+        )
+        ASCIIColors.red("=" * 80 + "\n")
+        sys.exit(1)  # Exit immediately
+
+    # 2. Check if this is a development environment (source directory exists)
+    try:
+        source_dir = Path(__file__).parent.parent.parent / "lightrag_webui"
+        src_dir = source_dir / "src"
+
+        # Determine if this is a development environment: source directory exists and contains src directory
+        if not source_dir.exists() or not src_dir.exists():
+            # Production environment, skip source code check
+            logger.debug(
+                "Production environment detected, skipping source freshness check"
+            )
+            return False
+
+        # Development environment, perform source code timestamp check
+        logger.debug("Development environment detected, checking source freshness")
+
+        # Source code file extensions (files to check)
+        source_extensions = {
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".mjs",
+            ".cjs",  # TypeScript/JavaScript
+            ".css",
+            ".scss",
+            ".sass",
+            ".less",  # Style files
+            ".json",
+            ".jsonc",  # Configuration/data files
+            ".html",
+            ".htm",  # Template files
+            ".md",
+            ".mdx",  # Markdown
+        }
+
+        # Key configuration files (in lightrag_webui root directory)
+        key_files = [
+            source_dir / "package.json",
+            source_dir / "bun.lock",
+            source_dir / "vite.config.ts",
+            source_dir / "tsconfig.json",
+            source_dir / "tailraid.config.js",
+            source_dir / "index.html",
+        ]
+
+        # Get the latest modification time of source code
+        latest_source_time = 0
+
+        # Check source code files in src directory
+        for file_path in src_dir.rglob("*"):
+            if file_path.is_file():
+                # Only check source code files, ignore temporary files and logs
+                if file_path.suffix.lower() in source_extensions:
+                    mtime = file_path.stat().st_mtime
+                    latest_source_time = max(latest_source_time, mtime)
+
+        # Check key configuration files
+        for key_file in key_files:
+            if key_file.exists():
+                mtime = key_file.stat().st_mtime
+                latest_source_time = max(latest_source_time, mtime)
+
+        # Get build time
+        build_time = index_html.stat().st_mtime
+
+        # Compare timestamps (5 second tolerance to avoid file system time precision issues)
+        if latest_source_time > build_time + 5:
+            ASCIIColors.yellow("\n" + "=" * 80)
+            ASCIIColors.yellow("WARNING: Frontend Source Code Has Been Updated")
+            ASCIIColors.yellow("=" * 80)
+            ASCIIColors.yellow(
+                "The frontend source code is newer than the current build."
+            )
+            ASCIIColors.yellow(
+                "This might happen after 'git pull' or manual code changes.\n"
+            )
+            ASCIIColors.cyan(
+                "Recommended: Rebuild the frontend to use the latest changes:"
+            )
+            ASCIIColors.cyan("    cd lightrag_webui")
+            ASCIIColors.cyan("    bun install --frozen-lockfile")
+            ASCIIColors.cyan("    bun run build")
+            ASCIIColors.cyan("    cd ..")
+            ASCIIColors.yellow("\nThe server will continue with the current build.")
+            ASCIIColors.yellow("=" * 80 + "\n")
+            return True  # Frontend is outdated
+        else:
+            logger.info("Frontend build is up-to-date")
+            return False  # Frontend is up-to-date
+
+    except Exception as e:
+        # If check fails, log warning but don't affect startup
+        logger.warning(f"Failed to check frontend source freshness: {e}")
+        return False  # Assume up-to-date on error
+
+
 def create_app(args):
+    # Check frontend build first and get outdated status
+    is_frontend_outdated = check_frontend_build()
+
+    # Create unified API version display with warning symbol if frontend is outdated
+    api_version_display = (
+        f"{__api_version__}⚠️" if is_frontend_outdated else __api_version__
+    )
+
     # Setup logging
     logger.setLevel(args.log_level)
     set_verbose_debug(args.verbose)
@@ -215,24 +333,6 @@ def create_app(args):
             # Data migration regardless of storage implementation
             await rag.check_and_migrate_data()
 
-            pipeline_status = await get_namespace_data("pipeline_status")
-
-            should_start_autoscan = False
-            async with get_pipeline_status_lock():
-                # Auto scan documents if enabled
-                if args.auto_scan_at_startup:
-                    if not pipeline_status.get("autoscanned", False):
-                        pipeline_status["autoscanned"] = True
-                        should_start_autoscan = True
-
-            # Only run auto scan when no other process started it first
-            if should_start_autoscan:
-                # Create background task
-                task = asyncio.create_task(run_scanning_process(rag, doc_manager))
-                app.state.background_tasks.add(task)
-                task.add_done_callback(app.state.background_tasks.discard)
-                logger.info(f"Process {os.getpid()} auto scan task started at startup.")
-
             ASCIIColors.green("\nServer is ready to accept connections! 🚀\n")
 
             yield
@@ -241,21 +341,31 @@ def create_app(args):
             # Clean up database connections
             await rag.finalize_storages()
 
-            # Clean up shared data
-            finalize_share_data()
+            if "LIGHTRAG_GUNICORN_MODE" not in os.environ:
+                # Only perform cleanup in Uvicorn single-process mode
+                logger.debug("Unvicorn Mode: finalizing shared storage...")
+                finalize_share_data()
+            else:
+                # In Gunicorn mode with preload_app=True, cleanup is handled by on_exit hooks
+                logger.debug(
+                    "Gunicorn Mode: postpone shared storage finalization to master process"
+                )
 
     # Initialize FastAPI
+    base_description = (
+        "Providing API for LightRAG core, Web UI and Ollama Model Emulation"
+    )
+    swagger_description = (
+        base_description
+        + (" (API-Key Enabled)" if api_key else "")
+        + "\n\n[View ReDoc documentation](/redoc)"
+    )
     app_kwargs = {
         "title": "LightRAG Server API",
-        "description": (
-            "Providing API for LightRAG core, Web UI and Ollama Model Emulation"
-            + "(With authentication)"
-            if api_key
-            else ""
-        ),
+        "description": swagger_description,
         "version": __api_version__,
         "openapi_url": "/openapi.json",  # Explicitly set OpenAPI schema URL
-        "docs_url": "/docs",  # Explicitly set docs URL
+        "docs_url": None,  # Disable default docs, we'll create custom endpoint
         "redoc_url": "/redoc",  # Explicitly set redoc URL
         "lifespan": lifespan,
     }
@@ -268,6 +378,35 @@ def create_app(args):
     }
 
     app = FastAPI(**app_kwargs)
+
+    # Add custom validation error handler for /query/data endpoint
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ):
+        # Check if this is a request to /query/data endpoint
+        if request.url.path.endswith("/query/data"):
+            # Extract error details
+            error_details = []
+            for error in exc.errors():
+                field_path = " -> ".join(str(loc) for loc in error["loc"])
+                error_details.append(f"{field_path}: {error['msg']}")
+
+            error_message = "; ".join(error_details)
+
+            # Return in the expected format for /query/data
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "failure",
+                    "message": f"Validation error: {error_message}",
+                    "data": {},
+                    "metadata": {},
+                },
+            )
+        else:
+            # For other endpoints, return the default FastAPI validation error
+            return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
     def get_cors_origins():
         """Get allowed origins from global_args
@@ -774,6 +913,25 @@ def create_app(args):
     ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)
     app.include_router(ollama_api.router, prefix="/api")
 
+    # Custom Swagger UI endpoint for offline support
+    @app.get("/docs", include_in_schema=False)
+    async def custom_swagger_ui_html():
+        """Custom Swagger UI HTML with local static files"""
+        return get_swagger_ui_html(
+            openapi_url=app.openapi_url,
+            title=app.title + " - Swagger UI",
+            oauth2_redirect_url="/docs/oauth2-redirect",
+            swagger_js_url="/static/swagger-ui/swagger-ui-bundle.js",
+            swagger_css_url="/static/swagger-ui/swagger-ui.css",
+            swagger_favicon_url="/static/swagger-ui/favicon-32x32.png",
+            swagger_ui_parameters=app.swagger_ui_parameters,
+        )
+
+    @app.get("/docs/oauth2-redirect", include_in_schema=False)
+    async def swagger_ui_redirect():
+        """OAuth2 redirect for Swagger UI"""
+        return get_swagger_ui_oauth2_redirect_html()
+
     @app.get("/")
     async def redirect_to_webui():
         """Redirect root path to /webui"""
@@ -795,7 +953,7 @@ def create_app(args):
                 "auth_mode": "disabled",
                 "message": "Authentication is disabled. Using guest access.",
                 "core_version": core_version,
-                "api_version": __api_version__,
+                "api_version": api_version_display,
                 "webui_title": webui_title,
                 "webui_description": webui_description,
             }
@@ -804,7 +962,7 @@ def create_app(args):
             "auth_configured": True,
             "auth_mode": "enabled",
             "core_version": core_version,
-            "api_version": __api_version__,
+            "api_version": api_version_display,
             "webui_title": webui_title,
             "webui_description": webui_description,
         }
@@ -822,7 +980,7 @@ def create_app(args):
                 "auth_mode": "disabled",
                 "message": "Authentication is disabled. Using guest access.",
                 "core_version": core_version,
-                "api_version": __api_version__,
+                "api_version": api_version_display,
                 "webui_title": webui_title,
                 "webui_description": webui_description,
             }
@@ -839,7 +997,7 @@ def create_app(args):
             "token_type": "bearer",
             "auth_mode": "enabled",
             "core_version": core_version,
-            "api_version": __api_version__,
+            "api_version": api_version_display,
             "webui_title": webui_title,
             "webui_description": webui_description,
         }
@@ -903,7 +1061,7 @@ def create_app(args):
                 "pipeline_busy": pipeline_status.get("busy", False),
                 "keyed_locks": keyed_lock_info,
                 "core_version": core_version,
-                "api_version": __api_version__,
+                "api_version": api_version_display,
                 "webui_title": webui_title,
                 "webui_description": webui_description,
             }
@@ -916,7 +1074,9 @@ def create_app(args):
         async def get_response(self, path: str, scope):
             response = await super().get_response(path, scope)
 
-            if path.endswith(".html"):
+            is_html = path.endswith(".html") or response.media_type == "text/html"
+
+            if is_html:
                 response.headers["Cache-Control"] = (
                     "no-cache, no-store, must-revalidate"
                 )
@@ -937,6 +1097,15 @@ def create_app(args):
                 response.headers["Content-Type"] = "text/css"
 
             return response
+
+    # Mount Swagger UI static files for offline support
+    swagger_static_dir = Path(__file__).parent / "static" / "swagger-ui"
+    if swagger_static_dir.exists():
+        app.mount(
+            "/static/swagger-ui",
+            StaticFiles(directory=swagger_static_dir),
+            name="swagger-ui-static",
+        )
 
     # Webui mount webui/index.html
     static_dir = Path(__file__).parent / "webui"
@@ -1079,8 +1248,10 @@ def main():
     update_uvicorn_mode_config()
     display_splash_screen(global_args)
 
-    # Setup signal handlers for graceful shutdown
-    setup_signal_handlers()
+    # Note: Signal handlers are NOT registered here because:
+    # - Uvicorn has built-in signal handling that properly calls lifespan shutdown
+    # - Custom signal handlers can interfere with uvicorn's graceful shutdown
+    # - Cleanup is handled by the lifespan context manager's finally block
 
     # Create application instance directly instead of using factory function
     app = create_app(global_args)

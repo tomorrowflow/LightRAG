@@ -21,15 +21,24 @@ pip install "lightrag-hku[api]"
 * 从源代码安装
 
 ```bash
-# 克隆仓库
+# Clone the repository
 git clone https://github.com/HKUDS/lightrag.git
 
-# 切换到仓库目录
+# Change to the repository directory
 cd lightrag
 
-# 如有必要，创建 Python 虚拟环境
-# 以可编辑模式安装并支持 API
+# Create a Python virtual environment
+uv venv --seed --python 3.12
+source .venv/bin/activate
+
+# Install in editable mode with API support
 pip install -e ".[api]"
+
+# Build front-end artifacts
+cd lightrag_webui
+bun install --frozen-lockfile
+bun run build
+cd ..
 ```
 
 ### 启动 LightRAG 服务器前的准备
@@ -109,28 +118,10 @@ lightrag-gunicorn --workers 4
 
 ### 使用 Docker 启动 LightRAG 服务器
 
-* 配置 .env 文件：
-    通过复制示例文件 [`env.example`](env.example) 创建个性化的 .env 文件，并根据实际需求设置 LLM 及 Embedding 参数。
-* 创建一个名为 docker-compose.yml 的文件：
-
-```yaml
-services:
-  lightrag:
-    container_name: lightrag
-    image: ghcr.io/hkuds/lightrag:latest
-    ports:
-      - "${PORT:-9621}:9621"
-    volumes:
-      - ./data/rag_storage:/app/data/rag_storage
-      - ./data/inputs:/app/data/inputs
-      - ./config.ini:/app/config.ini
-      - ./.env:/app/.env
-    env_file:
-      - .env
-    restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-```
+使用 Docker Compose 是部署和运行 LightRAG Server 最便捷的方式。
+- 创建一个项目目录。
+- 将 LightRAG 仓库中的 `docker-compose.yml` 文件复制到您的项目目录中。
+- 准备 `.env` 文件：复制示例文件 [`env.example`](https://ai.znipower.com:5013/c/env.example) 创建自定义的 `.env` 文件，并根据您的具体需求配置 LLM 和嵌入参数。
 
 * 通过以下命令启动 LightRAG 服务器：
 
@@ -138,19 +129,11 @@ services:
 docker compose up
 # 如果希望启动后让程序退到后台运行，需要在命令的最后添加 -d 参数
 ```
-> 可以通过以下链接获取官方的docker compose文件：[docker-compose.yml]( https://raw.githubusercontent.com/HKUDS/LightRAG/refs/heads/main/docker-compose.yml) 。如需获取LightRAG的历史版本镜像，可以访问以下链接: [LightRAG Docker Images]( https://github.com/HKUDS/LightRAG/pkgs/container/lightrag)
+> 可以通过以下链接获取官方的docker compose文件：[docker-compose.yml]( https://raw.githubusercontent.com/HKUDS/LightRAG/refs/heads/main/docker-compose.yml) 。如需获取LightRAG的历史版本镜像，可以访问以下链接: [LightRAG Docker Images]( https://github.com/HKUDS/LightRAG/pkgs/container/lightrag). 如需获取更多关于docker部署的信息，请参阅 [DockerDeployment.md](./../../docs/DockerDeployment.md).
 
-### 启动时自动扫描
+### 离线部署
 
-当使用 `--auto-scan-at-startup` 参数启动LightRAG Server时，系统将自动：
-
-1. 扫描输入目录中的新文件
-2. 为尚未在数据库中的新文档建立索引
-3. 使所有内容立即可用于 RAG 查询
-
-这种工作模式给启动一个临时的RAG任务提供给了方便。
-
-> `--input-dir` 参数指定要扫描的输入目录。您可以从 webui 触发输入目录扫描。
+官方的 LightRAG Docker 镜像完全兼容离线或隔离网络环境。如需搭建自己的离线部署环境，请参考 [离线部署指南](./../../docs/OfflineDeployment.md)。
 
 ### 启动多个LightRAG实例
 
@@ -201,24 +184,16 @@ MAX_ASYNC=4
 
 ### 将 Lightrag 安装为 Linux 服务
 
-从示例文件 `lightrag.service.example` 创建您的服务文件 `lightrag.service`。修改服务文件中的 WorkingDirectory 和 ExecStart：
+从示例文件 `lightrag.service.example` 创建您的服务文件 `lightrag.service`。修改服务文件中的服务启动定义：
 
 ```text
-Description=LightRAG Ollama Service
-WorkingDirectory=<lightrag 安装目录>
-ExecStart=<lightrag 安装目录>/lightrag/api/lightrag-api
+# Set Enviroment to your Python virtual enviroment
+Environment="PATH=/home/netman/lightrag-xyj/venv/bin"
+WorkingDirectory=/home/netman/lightrag-xyj
+# ExecStart=/home/netman/lightrag-xyj/venv/bin/lightrag-server
+ExecStart=/home/netman/lightrag-xyj/venv/bin/lightrag-gunicorn
 ```
-
-修改您的服务启动脚本：`lightrag-api`。根据需要更改 python 虚拟环境激活命令：
-
-```shell
-#!/bin/bash
-
-# 您的 python 虚拟环境激活命令
-source /home/netman/lightrag-xyj/venv/bin/activate
-# 启动 lightrag api 服务器
-lightrag-server
-```
+> ExecStart命令必须是 lightrag-gunicorn 或 lightrag-server 中的一个，不能使用其它脚本包裹它们。因为停止服务必须要求主进程必须是这两个进程。
 
 安装 LightRAG 服务。如果您的系统是 Ubuntu，以下命令将生效：
 
@@ -290,7 +265,17 @@ LIGHTRAG_API_KEY=your-secure-api-key-here
 WHITELIST_PATHS=/health,/api/*
 ```
 
-> 健康检查和 Ollama 模拟端点默认不进行 API 密钥检查。
+> 健康检查和 Ollama 模拟端点默认不进行 API 密钥检查。为了安全原因，如果不需要提供Ollama服务，应该把`/api/*`从WHITELIST_PATHS中移除。
+
+API Key使用的请求头是 `X-API-Key` 。以下是使用API访问LightRAG Server的一个例子：
+
+```
+curl -X 'POST' \
+  'http://localhost:9621/documents/scan' \
+  -H 'accept: application/json' \
+  -H 'X-API-Key: your-secure-api-key-here-123' \
+  -d ''
+```
 
 * 账户凭证（Web 界面需要登录后才能访问）
 
@@ -432,7 +417,6 @@ LIGHTRAG_DOC_STATUS_STORAGE=PGDocStatusStorage
 | --ssl-keyfile | None | SSL 私钥文件路径（如果启用 --ssl 则必需） |
 | --llm-binding | ollama | LLM 绑定类型（lollms、ollama、openai、openai-ollama、azure_openai、aws_bedrock） |
 | --embedding-binding | ollama | 嵌入绑定类型（lollms、ollama、openai、azure_openai、aws_bedrock） |
-| auto-scan-at-startup | - | 扫描输入目录中的新文件并开始索引 |
 
 ### Reranking 配置
 

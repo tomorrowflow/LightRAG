@@ -206,13 +206,6 @@ def parse_args() -> argparse.Namespace:
         help="Default workspace for all storage",
     )
 
-    parser.add_argument(
-        "--auto-scan-at-startup",
-        action="store_true",
-        default=False,
-        help="Enable automatic scanning when the program starts",
-    )
-
     # Server workers configuration
     parser.add_argument(
         "--workers",
@@ -348,6 +341,9 @@ def parse_args() -> argparse.Namespace:
 
     # Select Document loading tool (DOCLING, DEFAULT)
     args.document_loading_engine = get_env_value("DOCUMENT_LOADING_ENGINE", "DEFAULT")
+
+    # PDF decryption password
+    args.pdf_decrypt_password = get_env_value("PDF_DECRYPT_PASSWORD", None)
 
     # Add environment variables that were previously read directly
     args.cors_origins = get_env_value("CORS_ORIGINS", "*")
