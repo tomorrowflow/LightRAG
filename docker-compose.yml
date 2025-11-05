@@ -1,21 +1,203 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: lightrag_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lightrag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lightrag_password}
+      POSTGRES_DB: ${POSTGRES_DB:-lightrag}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - lightrag_network
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lightrag}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# Main LightRAG Server with Web UI
   lightrag:
-    container_name: lightrag
-    image: ghcr.io/hkuds/lightrag:latest
     build:
       context: .
       dockerfile: Dockerfile
-      tags:
-        - ghcr.io/hkuds/lightrag:latest
+    container_name: lightrag_server
     ports:
-      - "${PORT:-9621}:9621"
+      - "9621:9621"
     volumes:
+      # Persistent storage
       - ./data/rag_storage:/app/data/rag_storage
       - ./data/inputs:/app/data/inputs
-      - ./config.ini:/app/config.ini
-      - ./.env:/app/.env
-    env_file:
-      - .env
-    restart: unless-stopped
+      - ./data/outputs:/app/data/outputs
+      - ./data/tiktoken:/app/data/tiktoken
+      # Configuration files
+      - ./.env:/app/.env:ro
+    environment:
+      # LLM Configuration (External Ollama)
+      - LLM_BINDING=ollama
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:latest}
+      - LLM_BINDING_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OLLAMA_LLM_NUM_CTX=${OLLAMA_LLM_NUM_CTX:-32768}
+      
+      # Vision Model Configuration
+      - VISION_MODEL=${VISION_MODEL:-qwen2-vl:latest}
+      
+      # Embedding Configuration (External Ollama)
+      - EMBEDDING_BINDING=ollama
+      - EMBEDDING_BINDING_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - EMBEDDING_MODEL=bge-m3:latest
+      - EMBEDDING_DIM=1024
+      
+      # Storage Configuration
+      - KV_STORAGE=JsonKVStorage
+      - VECTOR_STORAGE=QdrantVectorDBStorage
+      - GRAPH_STORAGE=Neo4JStorage
+      - DOC_STATUS_STORAGE=JsonDocStatusStorage
+      
+      # Qdrant Configuration
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      
+      # Neo4j Configuration
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+      
+      # Server Configuration
+      - PORT=9621
+      - HOST=0.0.0.0
+      - WORKING_DIR=/app/data/rag_storage
+      - INPUT_DIR=/app/data/inputs
+      
+      # Processing Configuration
+      - MAX_ASYNC=4
+      - MAX_PARALLEL_INSERT=2
+      - WORKERS=2
+      
+      # Workspace isolation (optional)
+      - WORKSPACE=diary
+    # THIS IS THE KEY CHANGE - Run the server, not ingestion script
+    command: ["python", "-m", "lightrag.api.lightrag_server", 
+              "--host", "0.0.0.0", 
+              "--port", "9621", 
+              "--working-dir", "/app/data/rag_storage", 
+              "--input-dir", "/app/data/inputs"]
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    networks:
+      - lightrag_network
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:latest
+    container_name: lightrag_neo4j
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-neo4j_password}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_import_file_use__neo4j__config: "true"
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+    volumes:
+      - ./data/neo4j_data:/data
+      - ./data/neo4j_logs:/logs
+    networks:
+      - lightrag_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: lightrag_qdrant
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    networks:
+      - lightrag_network
+    ports:
+      - "6334:6333"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && echo -e 'GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'HTTP/1.1 200' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:latest
+    container_name: lightrag_redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-lightrag_password}
+    volumes:
+      - redis_data:/data
+    networks:
+      - lightrag_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  memgraph:
+    image: memgraph/memgraph:latest
+    container_name: lightrag_memgraph
+    volumes:
+      - memgraph_data:/var/lib/memgraph
+    networks:
+      - lightrag_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'RETURN 0;' | mgconsole || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 0s
+
+
+  mongodb:
+    image: mongo:latest
+    container_name: lightrag_mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-lightrag}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-lightrag_password}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-lightrag}
+    volumes:
+      - ./data/mongodb:/data/db
+    networks:
+      - lightrag_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  lightrag_network:
+    driver: bridge
+
+volumes:
+  redis_data:
+    driver: local
+  memgraph_data:
+    driver: local
