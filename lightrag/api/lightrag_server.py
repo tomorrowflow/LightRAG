@@ -769,15 +769,26 @@ def create_app(args):
     try:
         api_key = get_env_value("LLM_BINDING_API_KEY", "", str)
         base_url = get_env_value("LLM_BINDING_HOST", "", str)
+        llm_binding = get_env_value("LLM_BINDING", "openai", str)
+
+        # Get vision model from environment variables
+        # Priority: VISION_MODEL > OLLAMA_VISION_MODEL > default based on binding
+        vision_model = get_env_value("VISION_MODEL", None, str)
+        if not vision_model and llm_binding == "ollama":
+            vision_model = get_env_value("OLLAMA_VISION_MODEL", "llava", str)
+        elif not vision_model:
+            vision_model = "gpt-4o"  # Default for OpenAI-compatible APIs
 
         # Validate required configuration
-        if not api_key:
-            raise ValueError(
-                "LLM_BINDING_API_KEY is required for RAGAnything functionality"
-            )
         if not base_url:
             raise ValueError(
                 "LLM_BINDING_HOST is required for RAGAnything functionality"
+            )
+
+        # For OpenAI-compatible APIs, require API key
+        if llm_binding in ["openai", "azure_openai"] and not api_key:
+            raise ValueError(
+                "LLM_BINDING_API_KEY is required for OpenAI-compatible RAGAnything functionality"
             )
 
         config = RAGAnythingConfig(
@@ -789,53 +800,102 @@ def create_app(args):
             enable_equation_processing=True,
         )
 
-        # Define LLM model function
-        def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
-            return openai_complete_if_cache(
-                "gpt-4o-mini",
-                prompt,
-                system_prompt=system_prompt,
-                history_messages=history_messages,
-                api_key=api_key,
-                base_url=base_url,
-                **kwargs,
-            )
+        # Define LLM model function based on binding
+        if llm_binding == "ollama":
+            from lightrag.llm.ollama import _ollama_model_if_cache
 
-        # Define vision model function for image processing
-        def vision_model_func(
-            prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
-        ):
-            if image_data:
+            def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
+                llm_model = get_env_value("LLM_MODEL", "qwen2.5:latest", str)
+                return _ollama_model_if_cache(
+                    llm_model,
+                    prompt,
+                    system_prompt=system_prompt,
+                    history_messages=history_messages,
+                    host=base_url,
+                    api_key=api_key,
+                    **kwargs,
+                )
+        else:
+            # OpenAI-compatible API
+            def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
+                llm_model = get_env_value("LLM_MODEL", "gpt-4o-mini", str)
                 return openai_complete_if_cache(
-                    "gpt-4o",
-                    "",
-                    system_prompt=None,
-                    history_messages=[],
-                    messages=[
-                        {"role": "system", "content": system_prompt}
-                        if system_prompt
-                        else None,
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{image_data}"
-                                    },
-                                },
-                            ],
-                        }
-                        if image_data
-                        else {"role": "user", "content": prompt},
-                    ],
+                    llm_model,
+                    prompt,
+                    system_prompt=system_prompt,
+                    history_messages=history_messages,
                     api_key=api_key,
                     base_url=base_url,
                     **kwargs,
                 )
-            else:
-                return llm_model_func(prompt, system_prompt, history_messages, **kwargs)
+
+        # Define vision model function for image processing based on binding
+        if llm_binding == "ollama":
+            from lightrag.llm.ollama import _ollama_model_if_cache
+
+            def vision_model_func(
+                prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
+            ):
+                if image_data:
+                    # Ollama vision models expect the image in the message content
+                    messages = []
+                    if system_prompt:
+                        messages.append({"role": "system", "content": system_prompt})
+                    messages.extend(history_messages)
+                    # Ollama expects images in a specific format
+                    messages.append({
+                        "role": "user",
+                        "content": prompt,
+                        "images": [image_data]  # Base64 image data
+                    })
+                    
+                    return _ollama_model_if_cache(
+                        vision_model,
+                        "",  # Empty prompt since we're using messages
+                        system_prompt=None,
+                        history_messages=messages[:-1],  # All except last message
+                        host=base_url,
+                        api_key=api_key,
+                        **kwargs,
+                    )
+                else:
+                    return llm_model_func(prompt, system_prompt, history_messages, **kwargs)
+        else:
+            # OpenAI-compatible vision API
+            def vision_model_func(
+                prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
+            ):
+                if image_data:
+                    return openai_complete_if_cache(
+                        vision_model,
+                        "",
+                        system_prompt=None,
+                        history_messages=[],
+                        messages=[
+                            {"role": "system", "content": system_prompt}
+                            if system_prompt
+                            else None,
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{image_data}"
+                                        },
+                                    },
+                                ],
+                            }
+                            if image_data
+                            else {"role": "user", "content": prompt},
+                        ],
+                        api_key=api_key,
+                        base_url=base_url,
+                        **kwargs,
+                    )
+                else:
+                    return llm_model_func(prompt, system_prompt, history_messages, **kwargs)
 
         # Define embedding function
         raganything_embedding_func = EmbeddingFunc(
@@ -851,6 +911,10 @@ def create_app(args):
 
         # Initialize RAGAnything with new dataclass structure
         logger.info("Initializing RAGAnything functionality...")
+        logger.info(f"LLM Binding: {llm_binding}")
+        logger.info(f"Vision Model: {vision_model}")
+        logger.info(f"Base URL: {base_url}")
+        
         rag_anything = RAGAnything(
             lightrag=rag,
             config=config,
@@ -865,7 +929,7 @@ def create_app(args):
         RAGManager.set_rag(rag_anything)
         raganything_enabled = True
         logger.info(
-            "The RAGAnything feature has been successfully enabled, supporting multimodal document processing functionality"
+            f"The RAGAnything feature has been successfully enabled with {llm_binding} binding and {vision_model} vision model"
         )
 
     except ImportError as e:
