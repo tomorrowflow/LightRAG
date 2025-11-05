@@ -16,6 +16,7 @@ import sys
 import uvicorn
 import pipmaster as pm
 import inspect
+import json
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from pathlib import Path
@@ -319,6 +320,111 @@ def create_app(args):
     # Initialize document manager with workspace support for data isolation
     doc_manager = DocumentManager(args.input_dir, workspace=args.workspace)
 
+    def initialize_default_schemes() -> None:
+        """Initialize default processing schemes on server startup.
+        
+        Checks if schemes.json exists in examples/ directory.
+        If missing or invalid, creates it with default schemes.
+        Non-blocking: logs warnings but doesn't fail server startup.
+        """
+        try:
+            schemes_path = Path("examples") / "schemes.json"
+            
+            # Default schemes data
+            default_schemes = [
+                {
+                    "id": 1,
+                    "name": "LightRAG Standard",
+                    "config": {
+                        "framework": "lightrag",
+                        "extractor": "",
+                        "modelSource": ""
+                    }
+                },
+                {
+                    "id": 2,
+                    "name": "RAGAnything - MinerU (HuggingFace)",
+                    "config": {
+                        "framework": "raganything",
+                        "extractor": "mineru",
+                        "modelSource": "huggingface"
+                    }
+                },
+                {
+                    "id": 3,
+                    "name": "RAGAnything - MinerU (ModelScope)",
+                    "config": {
+                        "framework": "raganything",
+                        "extractor": "mineru",
+                        "modelSource": "modelscope"
+                    }
+                },
+                {
+                    "id": 4,
+                    "name": "RAGAnything - MinerU (Local)",
+                    "config": {
+                        "framework": "raganything",
+                        "extractor": "mineru",
+                        "modelSource": "local"
+                    }
+                },
+                {
+                    "id": 5,
+                    "name": "RAGAnything - DocLing",
+                    "config": {
+                        "framework": "raganything",
+                        "extractor": "docling",
+                        "modelSource": ""
+                    }
+                }
+            ]
+            
+            # Ensure examples directory exists
+            schemes_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Check if file exists and is valid
+            should_initialize = False
+            
+            if not schemes_path.exists():
+                logger.info("Schemes file not found, creating with default schemes")
+                should_initialize = True
+            else:
+                # Try to read and validate existing file
+                try:
+                    with open(schemes_path, 'r', encoding='utf-8') as f:
+                        existing_schemes = json.load(f)
+                    
+                    # Check if file is empty or not a list
+                    if not isinstance(existing_schemes, list) or len(existing_schemes) == 0:
+                        logger.warning(
+                            "Schemes file is empty or invalid, reinitializing with defaults"
+                        )
+                        should_initialize = True
+                    else:
+                        logger.info(
+                            f"Loaded {len(existing_schemes)} existing processing schemes"
+                        )
+                except (json.JSONDecodeError, IOError) as e:
+                    logger.warning(
+                        f"Failed to read schemes file: {e}, reinitializing with defaults"
+                    )
+                    should_initialize = True
+            
+            # Initialize or reinitialize schemes if needed
+            if should_initialize:
+                with open(schemes_path, 'w', encoding='utf-8') as f:
+                    json.dump(default_schemes, f, indent=2, ensure_ascii=False)
+                logger.info(
+                    f"Successfully initialized {len(default_schemes)} default processing schemes"
+                )
+        
+        except Exception as e:
+            # Non-blocking: log warning but don't fail server startup
+            logger.warning(
+                f"Failed to initialize default schemes: {e}. "
+                "Server will continue, but schemes may need manual configuration."
+            )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Lifespan context manager for startup and shutdown events"""
@@ -326,6 +432,9 @@ def create_app(args):
         app.state.background_tasks = set()
 
         try:
+            # Initialize default processing schemes
+            initialize_default_schemes()
+            
             # Initialize database connections
             await rag.initialize_storages()
             await initialize_pipeline_status()
