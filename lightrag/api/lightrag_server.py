@@ -831,35 +831,60 @@ def create_app(args):
 
         # Define vision model function for image processing based on binding
         if llm_binding == "ollama":
-            from lightrag.llm.ollama import _ollama_model_if_cache
+            import ollama
+            from lightrag.api import __api_version__
 
-            def vision_model_func(
+            async def vision_model_func(
                 prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
             ):
                 if image_data:
-                    # Ollama vision models expect the image in the message content
-                    messages = []
-                    if system_prompt:
-                        messages.append({"role": "system", "content": system_prompt})
-                    messages.extend(history_messages)
-                    # Ollama expects images in a specific format
-                    messages.append({
-                        "role": "user",
-                        "content": prompt,
-                        "images": [image_data]  # Base64 image data
-                    })
+                    # Set up headers with API key if provided
+                    headers = {
+                        "Content-Type": "application/json",
+                        "User-Agent": f"LightRAG/{__api_version__}",
+                    }
+                    if api_key:
+                        headers["Authorization"] = f"Bearer {api_key}"
                     
-                    return _ollama_model_if_cache(
-                        vision_model,
-                        "",  # Empty prompt since we're using messages
-                        system_prompt=None,
-                        history_messages=messages[:-1],  # All except last message
-                        host=base_url,
-                        api_key=api_key,
-                        **kwargs,
-                    )
+                    # Get timeout from kwargs or use default
+                    timeout = kwargs.pop("timeout", None)
+                    if timeout == 0:
+                        timeout = None
+                    
+                    # Create Ollama client
+                    ollama_client = ollama.AsyncClient(host=base_url, timeout=timeout, headers=headers)
+                    
+                    try:
+                        # Construct messages with image data for Ollama vision API
+                        messages = []
+                        if system_prompt:
+                            messages.append({"role": "system", "content": system_prompt})
+                        messages.extend(history_messages)
+                        # Ollama expects images as base64 strings in the images field
+                        messages.append({
+                            "role": "user",
+                            "content": prompt,
+                            "images": [image_data]  # Base64 image data
+                        })
+                        
+                        # Call Ollama chat API with vision model
+                        response = await ollama_client.chat(
+                            model=vision_model,
+                            messages=messages,
+                            **kwargs
+                        )
+                        return response["message"]["content"]
+                    except Exception as e:
+                        logger.error(f"Error in Ollama vision model: {str(e)}")
+                        raise
+                    finally:
+                        try:
+                            await ollama_client._client.aclose()
+                            logger.debug("Successfully closed Ollama client for vision")
+                        except Exception as close_error:
+                            logger.warning(f"Failed to close Ollama client: {close_error}")
                 else:
-                    return llm_model_func(prompt, system_prompt, history_messages, **kwargs)
+                    return await llm_model_func(prompt, system_prompt, history_messages, **kwargs)
         else:
             # OpenAI-compatible vision API
             def vision_model_func(
