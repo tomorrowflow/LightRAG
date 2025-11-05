@@ -24,7 +24,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: lightrag_server
+    container_name: lightrag-server
     ports:
       - "9621:9621"
     volumes:
@@ -104,7 +104,7 @@ services:
 
   neo4j:
     image: neo4j:latest
-    container_name: lightrag_neo4j
+    container_name: lightrag-neo4j
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-neo4j_password}
       NEO4J_PLUGINS: '["apoc"]'
@@ -127,7 +127,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: lightrag_qdrant
+    container_name: lightrag-qdrant
     volumes:
       - ./data/qdrant:/qdrant/storage
     networks:
@@ -143,7 +143,7 @@ services:
 
   redis:
     image: redis:latest
-    container_name: lightrag_redis
+    container_name: lightrag-redis
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-lightrag_password}
     volumes:
       - redis_data:/data
@@ -158,7 +158,7 @@ services:
 
   memgraph:
     image: memgraph/memgraph:latest
-    container_name: lightrag_memgraph
+    container_name: lightrag-memgraph
     volumes:
       - memgraph_data:/var/lib/memgraph
     networks:
@@ -174,7 +174,7 @@ services:
 
   mongodb:
     image: mongo:latest
-    container_name: lightrag_mongodb
+    container_name: lightrag-mongodb
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-lightrag}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-lightrag_password}
