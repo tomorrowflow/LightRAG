@@ -104,4 +104,4 @@ ENV INPUT_DIR=/app/data/inputs
 # Expose API port
 EXPOSE 9621
 
-ENTRYPOINT ["python", "-m", "lightrag.api.lightrag_server"]
+CMD ["lightrag-server", "--host", "0.0.0.0", "--port", "9621", "--working-dir", "/app/data/rag_storage", "--input-dir", "/app/data/inputs"]

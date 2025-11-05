@@ -79,13 +79,7 @@ services:
       - WORKERS=2
       
       # Workspace isolation (optional)
-      - WORKSPACE=diary
-    # THIS IS THE KEY CHANGE - Run the server, not ingestion script
-    command: ["python", "-m", "lightrag.api.lightrag_server", 
-              "--host", "0.0.0.0", 
-              "--port", "9621", 
-              "--working-dir", "/app/data/rag_storage", 
-              "--input-dir", "/app/data/inputs"]
+
     depends_on:
       neo4j:
         condition: service_healthy
@@ -95,13 +89,13 @@ services:
       - lightrag_network
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     restart: unless-stopped
 
   neo4j:
