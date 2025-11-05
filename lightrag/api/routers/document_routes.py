@@ -1623,6 +1623,13 @@ async def pipeline_index_files_raganything(
         return
 
     try:
+        # Convert empty strings to None for MinerU compatibility
+        # MinerU expects either valid strings ("huggingface", "modelscope", "local") or None
+        parser = parser if parser and parser.strip() else None
+        source = source if source and source.strip() else None
+        
+        logger.debug(f"[MinerU Config] parser={repr(parser)}, source={repr(source)}")
+        
         # Use get_pinyin_sort_key for Chinese pinyin sorting
         sorted_file_paths = sorted(
             file_paths, key=lambda p: get_pinyin_sort_key(str(p))
@@ -2368,21 +2375,46 @@ def create_document_routes(
                     SCHEMES_FILE = Path("./examples/schemes.json")
                     with open(SCHEMES_FILE, "r") as f:
                         schemes = json.load(f)
+                    
+                    # Debug: Log all available schemes
+                    logger.debug(f"[Schema Debug] Available schemes in file: {json.dumps(schemes, indent=2)}")
+                    logger.debug(f"[Schema Debug] Looking for scheme ID: {schemeId} (type: {type(schemeId)})")
+                    
                     for scheme in schemes:
-                        if str(scheme.get("id")) == schemeId:
-                            return scheme.get("config", {})
+                        scheme_id = scheme.get("id")
+                        logger.debug(f"[Schema Debug] Comparing scheme ID {scheme_id} (type: {type(scheme_id)}) with {schemeId}")
+                        if str(scheme_id) == schemeId:
+                            config = scheme.get("config", {})
+                            logger.debug(f"[Schema Debug] Found matching scheme! Full scheme object: {json.dumps(scheme, indent=2)}")
+                            logger.debug(f"[Schema Debug] Extracted config: {json.dumps(config, indent=2)}")
+                            return config
+                    
+                    logger.warning(f"[Schema Debug] No scheme found with ID {schemeId}. Returning empty config.")
                     return {}
                 except Exception as e:
                     logger.error(
                         f"Failed to load config for scheme {schemeId}: {str(e)}"
                     )
+                    logger.error(traceback.format_exc())
                     return {}
 
             config = load_config()
+            logger.debug(f"[Schema Debug] Config retrieved: {json.dumps(config, indent=2)}")
+            
             current_framework = config.get("framework")
             current_extractor = config.get("extractor")
             current_modelSource = config.get("modelSource")
             doc_pre_id = f"doc-pre-{safe_filename}"
+            
+            logger.debug(f"[Schema Debug] Raw values from config - framework={repr(current_framework)}, extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
+
+            # Convert empty strings to None for MinerU compatibility
+            # MinerU expects either valid strings ("huggingface", "modelscope", "local") or None
+            current_extractor = current_extractor if current_extractor and current_extractor.strip() else None
+            current_modelSource = current_modelSource if current_modelSource and current_modelSource.strip() else None
+            
+            logger.debug(f"[Schema Debug] After empty string conversion - extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
+            logger.debug(f"[MinerU Config Upload] Final values passed to MinerU - extractor={repr(current_extractor)}, modelSource={repr(current_modelSource)}")
 
             if current_framework and current_framework == "lightrag":
                 # Add to background tasks and get track_id
