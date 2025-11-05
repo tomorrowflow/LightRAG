@@ -68,6 +68,19 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Install system dependencies required by MinerU and other packages
+# libgl1-mesa-glx: OpenGL support for document parsing
+# libglib2.0-0: GLib library required by OpenGL and other packages
+# libsm6, libxext6, libxrender-dev: X11 libraries for full OpenCV support
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv for package management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
