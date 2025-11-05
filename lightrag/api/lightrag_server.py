@@ -832,7 +832,6 @@ def create_app(args):
         # Define vision model function for image processing based on binding
         if llm_binding == "ollama":
             import ollama
-            from lightrag.api import __api_version__
 
             async def vision_model_func(
                 prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
