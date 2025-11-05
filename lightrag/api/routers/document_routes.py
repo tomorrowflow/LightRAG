@@ -1602,20 +1602,19 @@ async def pipeline_index_files_raganything(
     """Index multiple files using RAGAnything framework for multimodal processing.
 
     Args:
-        rag_anything (RAGAnything): RAGAnything instance for multimodal document processing
+        rag_anything (RAGAnything): Base RAGAnything instance (provides LLM/embedding funcs)
         file_paths (List[Path]): List of file paths to be processed
-        track_id (str, optional): Tracking ID for batch monitoring. Defaults to None.
         scheme_name (str, optional): Processing scheme name for categorization.
             Defaults to None.
-        parser (str, optional): Document extraction tool to use.
+        parser (str, optional): Document extraction tool to use ('mineru' or 'docling').
             Defaults to None.
-        source (str, optional): The model source used by Mineru.
+        source (str, optional): The model source used by MinerU ('huggingface', 'modelscope', 'local').
             Defaults to None.
 
     Note:
-        - Uses RAGAnything's process_document_complete_lightrag_api method for each file
+        - Creates a new RAGAnything instance per batch with parser/source config
+        - Uses RAGAnything's process_document_complete method for each file
         - Supports multimodal content processing (images, tables, equations)
-        - Files are processed with "auto" parse method and "modelscope" source
         - Output is saved to "./output" directory
         - Errors are logged but don't stop processing of remaining files
     """
@@ -1627,32 +1626,50 @@ async def pipeline_index_files_raganything(
         logger.debug(f"[RAGAnything Pipeline] ENTRY - Received parser={repr(parser)}, source={repr(source)}")
         logger.debug(f"[RAGAnything Pipeline] ENTRY - File count: {len(file_paths) if file_paths else 0}")
         
-        # Convert empty strings to None for MinerU compatibility
-        # MinerU expects either valid strings ("huggingface", "modelscope", "local") or None
+        # Convert empty strings to None for compatibility
         parser = parser if parser and parser.strip() else None
         source = source if source and source.strip() else None
         
         logger.debug(f"[RAGAnything Pipeline] AFTER CONVERSION - parser={repr(parser)}, source={repr(source)}")
+        
+        # Create RAGAnything config with parser settings
+        from raganything import RAGAnythingConfig
+        from ..config import global_args
+        
+        config = RAGAnythingConfig(
+            working_dir=global_args.working_dir or "./rag_storage",
+            parser=parser or "mineru",  # Use provided parser or default to mineru
+            parse_method="auto",
+            enable_image_processing=True,
+            enable_table_processing=True,
+            enable_equation_processing=True,
+        )
+        
+        # Create new RAGAnything instance with the specific config
+        rag_instance = RAGAnything(
+            lightrag=rag_anything.lightrag,
+            config=config,
+            llm_model_func=rag_anything.llm_model_func,
+            vision_model_func=rag_anything.vision_model_func,
+            embedding_func=rag_anything.embedding_func,
+        )
+        
+        logger.debug(f"[RAGAnything Pipeline] Created RAGAnything instance with parser={repr(parser)}")
         
         # Use get_pinyin_sort_key for Chinese pinyin sorting
         sorted_file_paths = sorted(
             file_paths, key=lambda p: get_pinyin_sort_key(str(p))
         )
 
-        # Process files sequentially with track_id
+        # Process files sequentially
         for file_path in sorted_file_paths:
-            logger.debug(f"[RAGAnything Pipeline] CALLING RAGAnything - file={file_path.name}, parser={repr(parser)}, source={repr(source)}")
-            success = await rag_anything.process_document_complete_lightrag_api(
+            logger.debug(f"[RAGAnything Pipeline] Processing file={file_path.name}")
+            success = await rag_instance.process_document_complete(
                 file_path=str(file_path),
                 output_dir="./output",
                 parse_method="auto",
-                scheme_name=scheme_name,
-                parser=parser,
-                source=source,
             )
             logger.debug(f"[RAGAnything Pipeline] RESULT - file={file_path.name}, success={success}")
-            if success:
-                pass
 
     except Exception as e:
         error_msg = f"Error indexing files: {str(e)}"
@@ -2436,16 +2453,41 @@ def create_document_routes(
                 )
             else:
                 logger.debug(f"[Upload Endpoint] Using RAGAnything framework for {safe_filename}")
-                logger.debug(f"[Upload Endpoint] CALLING RAGAnything.process_document_complete_lightrag_api with parser={repr(current_extractor)}, source={repr(current_modelSource)}")
-                background_tasks.add_task(
-                    rag_anything.process_document_complete_lightrag_api,
-                    file_path=str(file_path),
-                    output_dir="./output",
-                    parse_method="auto",
-                    scheme_name=current_framework,
-                    parser=current_extractor,
-                    source=current_modelSource,
-                )
+                logger.debug(f"[Upload Endpoint] Creating RAGAnything instance with parser={repr(current_extractor)}, source={repr(current_modelSource)}")
+                
+                # Create a wrapper function to handle RAGAnything instance creation with config
+                async def process_with_raganything_config():
+                    """Process document with properly configured RAGAnything instance"""
+                    from raganything import RAGAnythingConfig, RAGAnything
+                    from ..config import global_args
+                    
+                    # Create config with parser settings
+                    config = RAGAnythingConfig(
+                        working_dir=global_args.working_dir or "./rag_storage",
+                        parser=current_extractor or "mineru",
+                        parse_method="auto",
+                        enable_image_processing=True,
+                        enable_table_processing=True,
+                        enable_equation_processing=True,
+                    )
+                    
+                    # Create RAGAnything instance with the specific config
+                    rag_instance = RAGAnything(
+                        lightrag=rag_anything.lightrag,
+                        config=config,
+                        llm_model_func=rag_anything.llm_model_func,
+                        vision_model_func=rag_anything.vision_model_func,
+                        embedding_func=rag_anything.embedding_func,
+                    )
+                    
+                    # Process the document
+                    await rag_instance.process_document_complete(
+                        file_path=str(file_path),
+                        output_dir="./output",
+                        parse_method="auto",
+                    )
+                
+                background_tasks.add_task(process_with_raganything_config)
                 logger.debug(f"[Upload Endpoint] RAGAnything task added to background_tasks")
 
             await rag.doc_status.upsert(
