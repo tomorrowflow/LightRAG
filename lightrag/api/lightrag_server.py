@@ -17,6 +17,9 @@ import uvicorn
 import pipmaster as pm
 import inspect
 import json
+import base64
+import io
+from PIL import Image
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from pathlib import Path
@@ -946,6 +949,22 @@ def create_app(args):
                 prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
             ):
                 if image_data:
+                    # Decode base64 image to check dimensions
+                    try:
+                        image_bytes = base64.b64decode(image_data)
+                        image = Image.open(io.BytesIO(image_bytes))
+                        width, height = image.size
+                        
+                        # Check if image meets minimum size requirement (32x32 pixels for Qwen3VL)
+                        if width < 32 or height < 32:
+                            logger.warning(
+                                f"Skipping image: dimensions {width}x{height} below minimum 32x32 pixels required by Qwen3VL"
+                            )
+                            return f"[Image skipped: dimensions {width}x{height} are below minimum 32x32 pixels required by vision model]"
+                    except Exception as e:
+                        logger.error(f"Error decoding image for size check: {str(e)}")
+                        raise
+                    
                     # Set up headers with API key if provided
                     headers = {
                         "Content-Type": "application/json",
