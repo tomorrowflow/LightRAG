@@ -1,0 +1,47 @@
+[
+  {
+    "id": 1,
+    "name": "LightRAG Standard",
+    "config": {
+      "framework": "lightrag",
+      "extractor": "",
+      "modelSource": ""
+    }
+  },
+  {
+    "id": 2,
+    "name": "RAGAnything - MinerU (HuggingFace)",
+    "config": {
+      "framework": "raganything",
+      "extractor": "mineru",
+      "modelSource": "huggingface"
+    }
+  },
+  {
+    "id": 3,
+    "name": "RAGAnything - MinerU (ModelScope)",
+    "config": {
+      "framework": "raganything",
+      "extractor": "mineru",
+      "modelSource": "modelscope"
+    }
+  },
+  {
+    "id": 4,
+    "name": "RAGAnything - MinerU (Local)",
+    "config": {
+      "framework": "raganything",
+      "extractor": "mineru",
+      "modelSource": "local"
+    }
+  },
+  {
+    "id": 5,
+    "name": "RAGAnything - DocLing",
+    "config": {
+      "framework": "raganything",
+      "extractor": "docling",
+      "modelSource": ""
+    }
+  }
+]
