@@ -39,7 +39,8 @@ services:
       # LLM Configuration (External Ollama)
       - LLM_BINDING=ollama
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:latest}
-      - LLM_BINDING_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Use LLM_BINDING_HOST directly instead of OLLAMA_HOST to allow separate text/vision instances
+      - LLM_BINDING_HOST=${LLM_BINDING_HOST:-http://host.docker.internal:11434}
       - LLM_BINDING_API_KEY=${LLM_BINDING_API_KEY}
       - OLLAMA_LLM_NUM_CTX=${OLLAMA_LLM_NUM_CTX:-32768}
       
@@ -48,10 +49,13 @@ services:
       
       # Vision Model Configuration
       - VISION_MODEL=${VISION_MODEL:-qwen2-vl:latest}
+      # Optional: Separate vision host (falls back to LLM_BINDING_HOST if not set)
+      - OLLAMA_VISION_HOST=${OLLAMA_VISION_HOST:-}
       
       # Embedding Configuration (External Ollama)
       - EMBEDDING_BINDING=ollama
-      - EMBEDDING_BINDING_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Use EMBEDDING_BINDING_HOST directly instead of OLLAMA_HOST to allow separate text/vision instances
+      - EMBEDDING_BINDING_HOST=${EMBEDDING_BINDING_HOST:-http://host.docker.internal:11434}
       - EMBEDDING_MODEL=bge-m3:latest
       - EMBEDDING_DIM=1024
       
@@ -197,7 +201,7 @@ services:
     container_name: lightrag-vllm-reranker
     command: >
       --model BAAI/bge-reranker-v2-m3
-      --task rerank
+      --task score
       --gpu-memory-utilization 0.9
       --max-model-len 4096
     volumes:
@@ -218,7 +222,6 @@ services:
     #         - driver: nvidia
     #           count: 1
     #           capabilities: [gpu]
-      restart: unless-stopped
 
 networks:
   lightrag_network:

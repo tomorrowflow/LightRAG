@@ -945,6 +945,13 @@ def create_app(args):
         if llm_binding == "ollama":
             import ollama
 
+            # Determine vision host - use OLLAMA_VISION_HOST if set, otherwise fall back to LLM_BINDING_HOST
+            vision_host = get_env_value("OLLAMA_VISION_HOST", base_url, str)
+            if vision_host != base_url:
+                logger.info(f"Using separate vision host: {vision_host} (text LLM host: {base_url})")
+            else:
+                logger.debug(f"Using same host for text and vision: {base_url}")
+
             async def vision_model_func(
                 prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
             ):
@@ -978,8 +985,8 @@ def create_app(args):
                     if timeout == 0:
                         timeout = None
                     
-                    # Create Ollama client
-                    ollama_client = ollama.AsyncClient(host=base_url, timeout=timeout, headers=headers)
+                    # Create Ollama client using vision host
+                    ollama_client = ollama.AsyncClient(host=vision_host, timeout=timeout, headers=headers)
                     
                     try:
                         # Construct messages with image data for Ollama vision API
