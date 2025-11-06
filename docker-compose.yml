@@ -199,7 +199,7 @@ services:
   vllm-reranker:
     image: vllm/vllm-openai:latest
     container_name: lightrag-vllm-reranker
-    command: >
+    command:
       --model BAAI/bge-reranker-v2-m3
       --task score
       --gpu-memory-utilization 0.9

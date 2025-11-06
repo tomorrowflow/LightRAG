@@ -950,7 +950,7 @@ def create_app(args):
             if vision_host != base_url:
                 logger.info(f"Using separate vision host: {vision_host} (text LLM host: {base_url})")
             else:
-                logger.debug(f"Using same host for text and vision: {base_url}")
+                logger.info(f"Using same host for text and vision: {base_url}")
 
             async def vision_model_func(
                 prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
