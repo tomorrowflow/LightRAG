@@ -1118,6 +1118,11 @@ def create_app(args):
         logger.info(f"Vision Model: {vision_model}")
         logger.info(f"Base URL: {base_url}")
         
+        # Diagnostic: Check vision model function status
+        logger.info(f"Vision model function value: {vision_model_func}")
+        logger.info(f"Vision model function type: {type(vision_model_func) if vision_model_func else 'NoneType'}")
+        logger.info(f"Vision model function is callable: {callable(vision_model_func) if vision_model_func else False}")
+        
         rag_anything = RAGAnything(
             lightrag=rag,
             config=config,
