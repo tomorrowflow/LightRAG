@@ -97,6 +97,7 @@ class LLMConfigCache:
         # Initialize configurations based on binding conditions
         self.openai_llm_options = None
         self.gemini_llm_options = None
+        self.gemini_embedding_options = None
         self.ollama_llm_options = None
         self.ollama_embedding_options = None
 
@@ -142,6 +143,23 @@ class LLMConfigCache:
                     "OllamaEmbeddingOptions not available, using default configuration"
                 )
                 self.ollama_embedding_options = {}
+
+        # Only initialize and log Gemini Embedding options when using Gemini Embedding binding
+        if args.embedding_binding == "gemini":
+            try:
+                from lightrag.llm.binding_options import GeminiEmbeddingOptions
+
+                self.gemini_embedding_options = GeminiEmbeddingOptions.options_dict(
+                    args
+                )
+                logger.info(
+                    f"Gemini Embedding Options: {self.gemini_embedding_options}"
+                )
+            except ImportError:
+                logger.warning(
+                    "GeminiEmbeddingOptions not available, using default configuration"
+                )
+                self.gemini_embedding_options = {}
 
 
 def check_frontend_build():
@@ -304,6 +322,7 @@ def create_app(args):
         "azure_openai",
         "aws_bedrock",
         "jina",
+        "gemini",
     ]:
         raise Exception("embedding binding not supported")
 
@@ -627,7 +646,9 @@ def create_app(args):
 
         return optimized_azure_openai_model_complete
 
-    def create_optimized_gemini_llm_func(config_cache: LLMConfigCache, args):
+    def create_optimized_gemini_llm_func(
+        config_cache: LLMConfigCache, args, llm_timeout: int
+    ):
         """Create optimized Gemini LLM function with cached configuration"""
 
         async def optimized_gemini_model_complete(
@@ -642,6 +663,8 @@ def create_app(args):
             if history_messages is None:
                 history_messages = []
 
+            # Use pre-processed configuration to avoid repeated parsing
+            kwargs["timeout"] = llm_timeout
             if (
                 config_cache.gemini_llm_options is not None
                 and "generation_config" not in kwargs
@@ -683,7 +706,7 @@ def create_app(args):
                     config_cache, args, llm_timeout
                 )
             elif binding == "gemini":
-                return create_optimized_gemini_llm_func(config_cache, args)
+                return create_optimized_gemini_llm_func(config_cache, args, llm_timeout)
             else:  # openai and compatible
                 # Use optimized function with pre-processed configuration
                 return create_optimized_openai_llm_func(config_cache, args, llm_timeout)
@@ -710,14 +733,14 @@ def create_app(args):
         return {}
 
     def create_optimized_embedding_function(
-        config_cache: LLMConfigCache, binding, model, host, api_key, dimensions, args
+        config_cache: LLMConfigCache, binding, model, host, api_key, args
     ):
         """
         Create optimized embedding function with pre-processed configuration for applicable bindings.
         Uses lazy imports for all bindings and avoids repeated configuration parsing.
         """
 
-        async def optimized_embedding_function(texts):
+        async def optimized_embedding_function(texts, embedding_dim=None):
             try:
                 if binding == "lollms":
                     from lightrag.llm.lollms import lollms_embed
@@ -756,13 +779,40 @@ def create_app(args):
                     from lightrag.llm.jina import jina_embed
 
                     return await jina_embed(
-                        texts, dimensions=dimensions, base_url=host, api_key=api_key
+                        texts,
+                        embedding_dim=embedding_dim,
+                        base_url=host,
+                        api_key=api_key,
+                    )
+                elif binding == "gemini":
+                    from lightrag.llm.gemini import gemini_embed
+
+                    # Use pre-processed configuration if available, otherwise fallback to dynamic parsing
+                    if config_cache.gemini_embedding_options is not None:
+                        gemini_options = config_cache.gemini_embedding_options
+                    else:
+                        # Fallback for cases where config cache wasn't initialized properly
+                        from lightrag.llm.binding_options import GeminiEmbeddingOptions
+
+                        gemini_options = GeminiEmbeddingOptions.options_dict(args)
+
+                    return await gemini_embed(
+                        texts,
+                        model=model,
+                        base_url=host,
+                        api_key=api_key,
+                        embedding_dim=embedding_dim,
+                        task_type=gemini_options.get("task_type", "RETRIEVAL_DOCUMENT"),
                     )
                 else:  # openai and compatible
                     from lightrag.llm.openai import openai_embed
 
                     return await openai_embed(
-                        texts, model=model, base_url=host, api_key=api_key
+                        texts,
+                        model=model,
+                        base_url=host,
+                        api_key=api_key,
+                        embedding_dim=embedding_dim,
                     )
             except ImportError as e:
                 raise Exception(f"Failed to import {binding} embedding: {e}")
@@ -802,17 +852,52 @@ def create_app(args):
         )
 
     # Create embedding function with optimized configuration
+    import inspect
+
+    # Create the optimized embedding function
+    optimized_embedding_func = create_optimized_embedding_function(
+        config_cache=config_cache,
+        binding=args.embedding_binding,
+        model=args.embedding_model,
+        host=args.embedding_binding_host,
+        api_key=args.embedding_binding_api_key,
+        args=args,  # Pass args object for fallback option generation
+    )
+
+    # Get embedding_send_dim from centralized configuration
+    embedding_send_dim = args.embedding_send_dim
+
+    # Check if the function signature has embedding_dim parameter
+    # Note: Since optimized_embedding_func is an async function, inspect its signature
+    sig = inspect.signature(optimized_embedding_func)
+    has_embedding_dim_param = "embedding_dim" in sig.parameters
+
+    # Determine send_dimensions value based on binding type
+    # Jina and Gemini REQUIRE dimension parameter (forced to True)
+    # OpenAI and others: controlled by EMBEDDING_SEND_DIM environment variable
+    if args.embedding_binding in ["jina", "gemini"]:
+        # Jina and Gemini APIs require dimension parameter - always send it
+        send_dimensions = has_embedding_dim_param
+        dimension_control = f"forced by {args.embedding_binding.title()} API"
+    else:
+        # For OpenAI and other bindings, respect EMBEDDING_SEND_DIM setting
+        send_dimensions = embedding_send_dim and has_embedding_dim_param
+        if send_dimensions or not embedding_send_dim:
+            dimension_control = "by env var"
+        else:
+            dimension_control = "by not hasparam"
+
+    logger.info(
+        f"Send embedding dimension: {send_dimensions} {dimension_control} "
+        f"(dimensions={args.embedding_dim}, has_param={has_embedding_dim_param}, "
+        f"binding={args.embedding_binding})"
+    )
+
+    # Create EmbeddingFunc with send_dimensions attribute
     embedding_func = EmbeddingFunc(
         embedding_dim=args.embedding_dim,
-        func=create_optimized_embedding_function(
-            config_cache=config_cache,
-            binding=args.embedding_binding,
-            model=args.embedding_model,
-            host=args.embedding_binding_host,
-            api_key=args.embedding_binding_api_key,
-            dimensions=args.embedding_dim,
-            args=args,  # Pass args object for fallback option generation
-        ),
+        func=optimized_embedding_func,
+        send_dimensions=send_dimensions,
     )
 
     # Configure rerank function based on args.rerank_bindingparameter
