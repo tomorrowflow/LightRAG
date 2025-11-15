@@ -3419,43 +3419,65 @@ def create_document_routes(
             HTTPException: If an error occurs while retrieving documents (500).
         """
         try:
+            logger.info(f"[PAGINATED] Endpoint called - page={request.page}, page_size={request.page_size}, status_filter={request.status_filter}, sort_field={request.sort_field}, sort_direction={request.sort_direction}")
             # Get paginated documents and status counts in parallel
-            docs_task = rag.doc_status.get_docs_paginated(
-                status_filter=request.status_filter,
-                page=request.page,
-                page_size=request.page_size,
-                sort_field=request.sort_field,
-                sort_direction=request.sort_direction,
-            )
-            status_counts_task = rag.doc_status.get_all_status_counts()
+            logger.debug(f"[PAGINATED] Starting parallel database queries...")
+            
+            try:
+                docs_task = rag.doc_status.get_docs_paginated(
+                    status_filter=request.status_filter,
+                    page=request.page,
+                    page_size=request.page_size,
+                    sort_field=request.sort_field,
+                    sort_direction=request.sort_direction,
+                )
+                logger.debug(f"[PAGINATED] Created get_docs_paginated task")
+                
+                status_counts_task = rag.doc_status.get_all_status_counts()
+                logger.debug(f"[PAGINATED] Created get_all_status_counts task")
 
-            # Execute both queries in parallel
-            (documents_with_ids, total_count), status_counts = await asyncio.gather(
-                docs_task, status_counts_task
-            )
+                # Execute both queries in parallel
+                logger.debug(f"[PAGINATED] Executing asyncio.gather for parallel queries...")
+                (documents_with_ids, total_count), status_counts = await asyncio.gather(
+                    docs_task, status_counts_task
+                )
+                logger.info(f"[PAGINATED] Database queries completed - retrieved {len(documents_with_ids)} documents, total_count={total_count}, status_counts={status_counts}")
+            except Exception as db_error:
+                logger.error(f"[PAGINATED] Database query failed: {str(db_error)}")
+                logger.error(f"[PAGINATED] Database error type: {type(db_error).__name__}")
+                logger.error(traceback.format_exc())
+                raise
 
             # Convert documents to response format
+            logger.debug(f"[PAGINATED] Starting document response serialization for {len(documents_with_ids)} documents...")
             doc_responses = []
-            for doc_id, doc in documents_with_ids:
-                doc_responses.append(
-                    DocStatusResponse(
-                        id=doc_id,
-                        content_summary=doc.content_summary,
-                        content_length=doc.content_length,
-                        status=doc.status,
-                        created_at=format_datetime(doc.created_at),
-                        updated_at=format_datetime(doc.updated_at),
-                        track_id=doc.track_id,
-                        chunks_count=doc.chunks_count,
-                        error_msg=doc.error_msg,
-                        metadata=doc.metadata,
-                        file_path=doc.file_path,
-                        scheme_name=doc.scheme_name,
-                        multimodal_content=doc.multimodal_content,
+            for idx, (doc_id, doc) in enumerate(documents_with_ids):
+                try:
+                    doc_responses.append(
+                        DocStatusResponse(
+                            id=doc_id,
+                            content_summary=doc.content_summary,
+                            content_length=doc.content_length,
+                            status=doc.status,
+                            created_at=format_datetime(doc.created_at),
+                            updated_at=format_datetime(doc.updated_at),
+                            track_id=doc.track_id,
+                            chunks_count=doc.chunks_count,
+                            error_msg=doc.error_msg,
+                            metadata=doc.metadata,
+                            file_path=doc.file_path,
+                            scheme_name=doc.scheme_name,
+                            multimodal_content=doc.multimodal_content,
+                        )
                     )
-                )
+                except Exception as serialize_error:
+                    logger.error(f"[PAGINATED] Failed to serialize document {idx} (id={doc_id}): {str(serialize_error)}")
+                    logger.error(f"[PAGINATED] Document data: status={doc.status}, created_at={doc.created_at}, updated_at={doc.updated_at}")
+                    raise
+            logger.debug(f"[PAGINATED] Document serialization completed successfully")
 
             # Calculate pagination info
+            logger.debug(f"[PAGINATED] Calculating pagination info...")
             total_pages = (total_count + request.page_size - 1) // request.page_size
             has_next = request.page < total_pages
             has_prev = request.page > 1
@@ -3468,17 +3490,26 @@ def create_document_routes(
                 has_next=has_next,
                 has_prev=has_prev,
             )
+            logger.debug(f"[PAGINATED] Pagination calculated - total_pages={total_pages}, has_next={has_next}, has_prev={has_prev}")
 
-            return PaginatedDocsResponse(
+            logger.debug(f"[PAGINATED] Building final response...")
+            response = PaginatedDocsResponse(
                 documents=doc_responses,
                 pagination=pagination,
                 status_counts=status_counts,
             )
+            logger.info(f"[PAGINATED] Request completed successfully - returning {len(doc_responses)} documents")
+            return response
 
+        except HTTPException:
+            # Re-raise HTTPException as-is
+            raise
         except Exception as e:
-            logger.error(f"Error getting paginated documents: {str(e)}")
+            logger.error(f"[PAGINATED] Unexpected error in paginated endpoint: {str(e)}")
+            logger.error(f"[PAGINATED] Error type: {type(e).__name__}")
+            logger.error(f"[PAGINATED] Full traceback:")
             logger.error(traceback.format_exc())
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
     @router.get(
         "/status_counts",
