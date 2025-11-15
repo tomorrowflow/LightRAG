@@ -122,17 +122,18 @@ def get_combined_auth_dependency(api_key: Optional[str] = None):
                     raise
                 # For other exceptions, continue processing
 
-        # 3. Acept all request if no API protection needed
-        if not auth_configured and not api_key_configured:
-            return
-
-        # 4. Validate API key if provided and API-Key authentication is configured
+        # 3. Validate API key if provided and API-Key authentication is configured
+        # This check happens before JWT validation to allow API key auth even when JWT is configured
         if (
             api_key_configured
             and api_key_header_value
             and api_key_header_value == api_key
         ):
             return  # API key validation successful
+
+        # 4. Accept all request if no API protection needed
+        if not auth_configured and not api_key_configured:
+            return
 
         ### Authentication failed ####
 

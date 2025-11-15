@@ -1130,7 +1130,7 @@ def create_app(args):
     raganything_error_message = None
 
     try:
-        api_key = get_env_value("LLM_BINDING_API_KEY", "", str)
+        raganything_api_key = get_env_value("LLM_BINDING_API_KEY", "", str)
         base_url = get_env_value("LLM_BINDING_HOST", "", str)
         llm_binding = get_env_value("LLM_BINDING", "openai", str)
 
@@ -1149,7 +1149,7 @@ def create_app(args):
             )
 
         # For OpenAI-compatible APIs, require API key
-        if llm_binding in ["openai", "azure_openai"] and not api_key:
+        if llm_binding in ["openai", "azure_openai"] and not raganything_api_key:
             raise ValueError(
                 "LLM_BINDING_API_KEY is required for OpenAI-compatible RAGAnything functionality"
             )
@@ -1175,7 +1175,7 @@ def create_app(args):
                     system_prompt=system_prompt,
                     history_messages=history_messages,
                     host=base_url,
-                    api_key=api_key,
+                    api_key=raganything_api_key,
                     **kwargs,
                 )
         else:
@@ -1187,7 +1187,7 @@ def create_app(args):
                     prompt,
                     system_prompt=system_prompt,
                     history_messages=history_messages,
-                    api_key=api_key,
+                    api_key=raganything_api_key,
                     base_url=base_url,
                     **kwargs,
                 )
@@ -1228,8 +1228,8 @@ def create_app(args):
                         "Content-Type": "application/json",
                         "User-Agent": f"LightRAG/{__api_version__}",
                     }
-                    if api_key:
-                        headers["Authorization"] = f"Bearer {api_key}"
+                    if raganything_api_key:
+                        headers["Authorization"] = f"Bearer {raganything_api_key}"
                     
                     # Get timeout from kwargs or use default
                     timeout = kwargs.pop("timeout", None)
@@ -1300,7 +1300,7 @@ def create_app(args):
                             if image_data
                             else {"role": "user", "content": prompt},
                         ],
-                        api_key=api_key,
+                        api_key=raganything_api_key,
                         base_url=base_url,
                         **kwargs,
                     )
@@ -1314,7 +1314,7 @@ def create_app(args):
             func=lambda texts: openai_embed(
                 texts,
                 model="text-embedding-3-large",
-                api_key=api_key,
+                api_key=raganything_api_key,
                 base_url=base_url,
             ),
         )
