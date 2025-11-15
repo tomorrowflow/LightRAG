@@ -131,7 +131,7 @@ offline-llm = [
 
 offline = [
     # Complete offline package (includes api for document processing, plus storage and LLM)
-    "lightrag-hku[api,offline-storage,offline-llm]",
+    "lightrag-hku[offline-docs,offline-storage,offline-llm]",
 ]
 
 evaluation = [
