@@ -526,7 +526,8 @@ class DocStatusResponse(BaseModel):
     metadata: Optional[dict[str, Any]] = Field(
         default=None, description="Additional metadata about the document"
     )
-    file_path: str = Field(description="Path to the document file")
+    file_path: Optional[str] = Field(
+        default=None, description="Path to the document file")
     scheme_name: Optional[str] = Field(
         default=None, description="Name of the processing scheme used for this document"
     )
