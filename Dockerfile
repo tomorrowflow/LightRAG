@@ -43,7 +43,7 @@ COPY setup.py .
 COPY uv.lock .
 
 # Copy local dependency
-COPY raganything/ ./raganything/
+COPY RAG-Anything/ ./raganything/
 
 # Install dependencies (base + API + offline extras) without the project to improve caching
 RUN --mount=type=cache,target=/root/.local/share/uv \
