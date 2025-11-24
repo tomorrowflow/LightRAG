@@ -2134,20 +2134,23 @@ def normalize_extracted_info(name: str, remove_inner_quotes=False) -> str:
     # Chinese full-width space to regular space (after other replacements)
     name = name.replace("　", " ")
 
-    # Use regex to remove spaces between Chinese characters
-    # Regex explanation:
-    # (?<=[\u4e00-\u9fa5]): Positive lookbehind for Chinese character
-    # \s+: One or more whitespace characters
-    # (?=[\u4e00-\u9fa5]): Positive lookahead for Chinese character
-    name = re.sub(r"(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])", "", name)
+    # Only apply Chinese-specific space removal if Chinese characters are present
+    # This prevents pure English text like "AI Framework" from being affected
+    if re.search(r"[\u4e00-\u9fa5]", name):
+        # Use regex to remove spaces between Chinese characters
+        # Regex explanation:
+        # (?<=[\u4e00-\u9fa5]): Positive lookbehind for Chinese character
+        # \s+: One or more whitespace characters
+        # (?=[\u4e00-\u9fa5]): Positive lookahead for Chinese character
+        name = re.sub(r"(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])", "", name)
 
-    # Remove spaces between Chinese and English/numbers/symbols
-    name = re.sub(
-        r"(?<=[\u4e00-\u9fa5])\s+(?=[a-zA-Z0-9\(\)\[\]@#$%!&\*\-=+_])", "", name
-    )
-    name = re.sub(
-        r"(?<=[a-zA-Z0-9\(\)\[\]@#$%!&\*\-=+_])\s+(?=[\u4e00-\u9fa5])", "", name
-    )
+        # Remove spaces between Chinese and English/numbers/symbols
+        name = re.sub(
+            r"(?<=[\u4e00-\u9fa5])\s+(?=[a-zA-Z0-9\(\)\[\]@#$%!&\*\-=+_])", "", name
+        )
+        name = re.sub(
+            r"(?<=[a-zA-Z0-9\(\)\[\]@#$%!&\*\-=+_])\s+(?=[\u4e00-\u9fa5])", "", name
+        )
 
     # Remove outer quotes
     if len(name) >= 2:
