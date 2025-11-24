@@ -295,15 +295,19 @@ async def openai_complete_if_cache(
     if timeout is not None:
         kwargs["timeout"] = timeout
 
+    # Determine the correct model identifier to use
+    # For Azure OpenAI, we must use the deployment name instead of the model name
+    api_model = azure_deployment if use_azure and azure_deployment else model
+
     try:
         # Don't use async with context manager, use client directly
         if "response_format" in kwargs:
             response = await openai_async_client.chat.completions.parse(
-                model=model, messages=messages, **kwargs
+                model=api_model, messages=messages, **kwargs
             )
         else:
             response = await openai_async_client.chat.completions.create(
-                model=model, messages=messages, **kwargs
+                model=api_model, messages=messages, **kwargs
             )
     except APIConnectionError as e:
         logger.error(f"OpenAI API Connection Error: {e}")
@@ -348,7 +352,10 @@ async def openai_complete_if_cache(
 
                     # Check if choices exists and is not empty
                     if not hasattr(chunk, "choices") or not chunk.choices:
-                        logger.warning(f"Received chunk without choices: {chunk}")
+                        # Azure OpenAI sends content filter results in first chunk without choices
+                        logger.debug(
+                            f"Received chunk without choices (likely Azure content filter): {chunk}"
+                        )
                         continue
 
                     # Check if delta exists
@@ -742,9 +749,13 @@ async def openai_embed(
     )
 
     async with openai_async_client:
+        # Determine the correct model identifier to use
+        # For Azure OpenAI, we must use the deployment name instead of the model name
+        api_model = azure_deployment if use_azure and azure_deployment else model
+
         # Prepare API call parameters
         api_params = {
-            "model": model,
+            "model": api_model,
             "input": texts,
             "encoding_format": "base64",
         }
@@ -809,11 +820,12 @@ async def azure_openai_complete_if_cache(
         api_version
         or os.getenv("AZURE_OPENAI_API_VERSION")
         or os.getenv("OPENAI_API_VERSION")
+        or "2024-08-01-preview"
     )
 
     # Call the unified implementation with Azure-specific parameters
     return await openai_complete_if_cache(
-        model=model,
+        model=deployment,
         prompt=prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,
@@ -921,14 +933,16 @@ async def azure_openai_embed(
     api_version = (
         api_version
         or os.getenv("AZURE_EMBEDDING_API_VERSION")
+        or os.getenv("AZURE_OPENAI_API_VERSION")
         or os.getenv("OPENAI_API_VERSION")
+        or "2024-08-01-preview"
     )
 
     # CRITICAL: Call openai_embed.func (unwrapped) to avoid double decoration
     # openai_embed is an EmbeddingFunc instance, .func accesses the underlying function
     return await openai_embed.func(
         texts=texts,
-        model=model or deployment,
+        model=deployment,
         base_url=base_url,
         api_key=api_key,
         token_tracker=token_tracker,
