@@ -106,6 +106,9 @@ async def process_with_rag(
             enable_image_processing=True,
             enable_table_processing=True,
             enable_equation_processing=True,
+            # GPU is now used by default for MinerU (cuda:0)
+            # To override device: device="cpu" or device="cuda:1"
+            # Set MINERU_DEVICE environment variable to change default
         )
 
         # Define LLM model function
