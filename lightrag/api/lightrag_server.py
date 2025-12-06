@@ -15,7 +15,6 @@ import logging.config
 import sys
 import uvicorn
 import pipmaster as pm
-import inspect
 import json
 import base64
 import io
@@ -1157,12 +1156,41 @@ def create_app(args):
         name=args.simulated_model_name, tag=args.simulated_model_tag
     )
 
+    # Create retrieval LLM function if retrieval environment variables are set
+    retrieval_llm_model_func = None
+    retrieval_binding = os.getenv("RETRIEVAL_LLM_BINDING")
+    if retrieval_binding:
+        # Get retrieval-specific environment variables
+        retrieval_model = os.getenv("RETRIEVAL_LLM_MODEL")
+        retrieval_host = os.getenv("RETRIEVAL_LLM_BINDING_HOST")
+        retrieval_api_key = os.getenv("RETRIEVAL_LLM_BINDING_API_KEY")
+        
+        # Create a modified args object for retrieval LLM
+        class RetrievalArgs:
+            def __init__(self):
+                self.llm_binding = retrieval_binding
+                self.llm_model = retrieval_model or args.llm_model
+                self.llm_binding_host = retrieval_host or args.llm_binding_host
+                self.llm_binding_api_key = retrieval_api_key or args.llm_binding_api_key
+        
+        retrieval_args = RetrievalArgs()
+        
+        try:
+            retrieval_llm_model_func = create_llm_model_func(retrieval_args.llm_binding)
+            logger.info(f"Retrieval LLM configured: {retrieval_binding} - {retrieval_args.llm_model}")
+        except ImportError as e:
+            logger.error(f"Failed to import {retrieval_binding} retrieval LLM binding: {e}")
+            retrieval_llm_model_func = None
+    else:
+        logger.info("No retrieval LLM binding configured, using primary LLM for retrieval")
+
     # Initialize RAG with unified configuration
     try:
         rag = LightRAG(
             working_dir=args.working_dir,
             workspace=args.workspace,
             llm_model_func=create_llm_model_func(args.llm_binding),
+            retrieval_llm_model_func=retrieval_llm_model_func,
             llm_model_name=args.llm_model,
             llm_model_max_async=args.max_async,
             summary_max_tokens=args.summary_max_tokens,

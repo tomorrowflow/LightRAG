@@ -318,6 +318,9 @@ class LightRAG:
     llm_model_func: Callable[..., object] | None = field(default=None)
     """Function for interacting with the large language model (LLM). Must be set before use."""
 
+    retrieval_llm_model_func: Callable[..., object] | None = field(default=None)
+    """Function for interacting with the retrieval-specific LLM. If not set, uses llm_model_func."""
+
     llm_model_name: str = field(default="gpt-4o-mini")
     """Name of the LLM model used for generating responses."""
 
@@ -660,6 +663,24 @@ class LightRAG:
                 **self.llm_model_kwargs,
             )
         )
+
+        # Initialize retrieval LLM with fallback to primary LLM
+        if self.retrieval_llm_model_func is not None:
+            # Apply priority wrapper to retrieval LLM if provided
+            self.retrieval_llm_model_func = priority_limit_async_func_call(
+                self.llm_model_max_async,
+                llm_timeout=self.default_llm_timeout,
+                queue_name="Retrieval LLM func",
+            )(
+                partial(
+                    self.retrieval_llm_model_func,  # type: ignore
+                    hashing_kv=hashing_kv,
+                    **self.llm_model_kwargs,
+                )
+            )
+        else:
+            # Fallback to primary LLM if retrieval LLM not provided
+            self.retrieval_llm_model_func = self.llm_model_func
 
         self._storages_status = StoragesStatus.CREATED
 
