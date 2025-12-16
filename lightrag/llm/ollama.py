@@ -176,6 +176,15 @@ async def ollama_model_complete(
 async def ollama_embed(
     texts: list[str], embed_model: str = "bge-m3:latest", **kwargs
 ) -> np.ndarray:
+    # Input validation: Check for empty or whitespace-only texts
+    validated_texts = []
+    for i, text in enumerate(texts):
+        if not text or text.isspace():
+            logger.warning(f"Text at index {i} is empty or contains only whitespace. Replacing with placeholder.")
+            validated_texts.append(" ")  # Use a single space as placeholder
+        else:
+            validated_texts.append(text)
+
     api_key = kwargs.pop("api_key", None)
     if not api_key:
         api_key = os.getenv("OLLAMA_API_KEY")
@@ -195,9 +204,16 @@ async def ollama_embed(
     try:
         options = kwargs.pop("options", {})
         data = await ollama_client.embed(
-            model=embed_model, input=texts, options=options
+            model=embed_model, input=validated_texts, options=options
         )
-        return np.array(data["embeddings"])
+        embeddings = np.array(data["embeddings"])
+        
+        # NaN detection and handling
+        if np.isnan(embeddings).any():
+            logger.warning("NaN values detected in embeddings. Replacing with zeros.")
+            embeddings = np.nan_to_num(embeddings, nan=0.0)
+        
+        return embeddings
     except Exception as e:
         logger.error(f"Error in ollama_embed: {str(e)}")
         try:
