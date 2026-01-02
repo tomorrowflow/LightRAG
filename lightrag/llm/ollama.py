@@ -9,6 +9,7 @@ if not pm.is_installed("ollama"):
     pm.install("ollama")
 
 import ollama
+from ollama._types import ResponseError
 
 from tenacity import (
     retry,
@@ -52,10 +53,10 @@ def _coerce_host_for_cloud_model(host: Optional[str], model: object) -> Optional
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=4, max=10),
+    stop=stop_after_attempt(5),  # Increase from 3 to 5 attempts
+    wait=wait_exponential(multiplier=1, min=4, max=60),  # Extend max wait to 60 seconds
     retry=retry_if_exception_type(
-        (RateLimitError, APIConnectionError, APITimeoutError)
+        (RateLimitError, APIConnectionError, APITimeoutError, ResponseError)
     ),
 )
 async def _ollama_model_if_cache(
@@ -174,6 +175,13 @@ async def ollama_model_complete(
 
 @wrap_embedding_func_with_attrs(
     embedding_dim=1024, max_token_size=8192, model_name="bge-m3:latest"
+)
+@retry(
+    stop=stop_after_attempt(5),  # Increase from 3 to 5 attempts
+    wait=wait_exponential(multiplier=1, min=4, max=60),  # Extend max wait to 60 seconds
+    retry=retry_if_exception_type(
+        (RateLimitError, APIConnectionError, APITimeoutError, ResponseError)
+    ),
 )
 async def ollama_embed(
     texts: list[str],
