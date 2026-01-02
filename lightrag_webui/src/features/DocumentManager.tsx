@@ -1172,6 +1172,7 @@ export default function DocumentManager() {
             >
               <ActivityIcon /> {t('documentPanel.documentManager.pipelineStatusButton')}
             </Button>
+            <SchemeManager />
           </div>
 
           {/* Pagination Controls in the middle */}
