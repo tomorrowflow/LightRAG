@@ -1883,10 +1883,12 @@ async def pipeline_index_files_raganything(
         # Process files sequentially
         for file_path in sorted_file_paths:
             logger.debug(f"[RAGAnything Pipeline] Processing file={file_path.name}")
-            success = await rag_instance.process_document_complete(
+            success = await rag_instance.process_document_complete_lightrag_api(
                 file_path=str(file_path),
                 output_dir="./output",
                 parse_method="auto",
+                scheme_name=scheme_name,
+                parser=parser,
             )
             logger.debug(f"[RAGAnything Pipeline] RESULT - file={file_path.name}, success={success}")
 
@@ -2774,34 +2776,56 @@ def create_document_routes(
                 # Create a wrapper function to handle RAGAnything instance creation with config
                 async def process_with_raganything_config():
                     """Process document with properly configured RAGAnything instance"""
-                    from raganything import RAGAnythingConfig, RAGAnything
-                    from ..config import global_args
-                    
-                    # Create config with parser settings
-                    config = RAGAnythingConfig(
-                        working_dir=global_args.working_dir or "./rag_storage",
-                        parser=current_extractor or "mineru",
-                        parse_method="auto",
-                        enable_image_processing=True,
-                        enable_table_processing=True,
-                        enable_equation_processing=True,
-                    )
-                    
-                    # Create RAGAnything instance with the specific config
-                    rag_instance = RAGAnything(
-                        lightrag=rag_anything.lightrag,
-                        config=config,
-                        llm_model_func=rag_anything.llm_model_func,
-                        vision_model_func=rag_anything.vision_model_func,
-                        embedding_func=rag_anything.embedding_func,
-                    )
-                    
-                    # Process the document
-                    await rag_instance.process_document_complete(
-                        file_path=str(file_path),
-                        output_dir="./output",
-                        parse_method="auto",
-                    )
+                    try:
+                        from raganything import RAGAnythingConfig, RAGAnything
+                        from ..config import global_args
+
+                        # Create config with parser settings
+                        config = RAGAnythingConfig(
+                            working_dir=global_args.working_dir or "./rag_storage",
+                            parser=current_extractor or "mineru",
+                            parse_method="auto",
+                            enable_image_processing=True,
+                            enable_table_processing=True,
+                            enable_equation_processing=True,
+                        )
+
+                        # Create RAGAnything instance with the specific config
+                        rag_instance = RAGAnything(
+                            lightrag=rag_anything.lightrag,
+                            config=config,
+                            llm_model_func=rag_anything.llm_model_func,
+                            vision_model_func=rag_anything.vision_model_func,
+                            embedding_func=rag_anything.embedding_func,
+                        )
+
+                        # Process the document using the API-specific method
+                        # that properly manages doc status transitions (READY → HANDLING → PROCESSED)
+                        await rag_instance.process_document_complete_lightrag_api(
+                            file_path=str(file_path),
+                            output_dir="./output",
+                            parse_method="auto",
+                            scheme_name=current_framework,
+                            parser=current_extractor,
+                        )
+                    except Exception as e:
+                        # If the wrapper itself fails (import error, constructor failure, etc.),
+                        # the doc would stay READY forever. Mark it FAILED.
+                        logger.error(f"RAGAnything background task failed for {safe_filename}: {e}")
+                        logger.error(traceback.format_exc())
+                        try:
+                            await rag.doc_status.upsert(
+                                {
+                                    doc_pre_id: {
+                                        "status": DocStatus.FAILED,
+                                        "error_msg": f"Background task failed: {str(e)}",
+                                        "file_path": safe_filename,
+                                    }
+                                }
+                            )
+                            await rag.doc_status.index_done_callback()
+                        except Exception as status_err:
+                            logger.error(f"Failed to update doc status to FAILED: {status_err}")
                 
                 background_tasks.add_task(process_with_raganything_config)
                 logger.debug(f"[Upload Endpoint] RAGAnything task added to background_tasks")

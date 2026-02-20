@@ -2217,12 +2217,21 @@ class LightRAG:
                                     and len(status_doc.multimodal_content) > 0
                                 ):
                                     raganything_instance = RAGManager.get_rag()
-                                    await raganything_instance._process_multimodal_content(
-                                        status_doc.multimodal_content,
-                                        status_doc.file_path,
-                                        doc_id,
-                                        pipeline_status=pipeline_status,
-                                        pipeline_status_lock=pipeline_status_lock,
+                                    # Apply overall multimodal processing timeout from RAGAnything config
+                                    multimodal_timeout = None
+                                    if hasattr(raganything_instance, 'config') and hasattr(raganything_instance.config, 'multimodal_processing_timeout'):
+                                        timeout_val = raganything_instance.config.multimodal_processing_timeout
+                                        if timeout_val > 0:
+                                            multimodal_timeout = timeout_val
+                                    await asyncio.wait_for(
+                                        raganything_instance._process_multimodal_content(
+                                            status_doc.multimodal_content,
+                                            status_doc.file_path,
+                                            doc_id,
+                                            pipeline_status=pipeline_status,
+                                            pipeline_status_lock=pipeline_status_lock,
+                                        ),
+                                        timeout=multimodal_timeout,
                                     )
 
                                 current_doc_status = await self.doc_status.get_by_id(
