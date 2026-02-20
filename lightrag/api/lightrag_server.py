@@ -1197,6 +1197,7 @@ def create_app(args):
             workspace=args.workspace,
             llm_model_func=create_llm_model_func(args.llm_binding),
             retrieval_llm_model_func=retrieval_llm_model_func,
+            retrieval_llm_model_name=os.getenv("RETRIEVAL_LLM_MODEL"),
             llm_model_name=args.llm_model,
             llm_model_max_async=args.max_async,
             summary_max_tokens=args.summary_max_tokens,

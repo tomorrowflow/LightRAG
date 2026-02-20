@@ -329,6 +329,11 @@ class LightRAG:
     retrieval_llm_model_func: Callable[..., object] | None = field(default=None)
     """Function for interacting with the retrieval-specific LLM. If not set, uses llm_model_func."""
 
+    retrieval_llm_model_name: str | None = field(
+        default_factory=lambda: os.getenv("RETRIEVAL_LLM_MODEL", None)
+    )
+    """Name of the retrieval LLM model. If not set, uses llm_model_name."""
+
     llm_model_name: str = field(default="gpt-4o-mini")
     """Name of the LLM model used for generating responses."""
 
@@ -692,6 +697,7 @@ class LightRAG:
                 partial(
                     self.retrieval_llm_model_func,  # type: ignore
                     hashing_kv=hashing_kv,
+                    model_name=self.retrieval_llm_model_name or self.llm_model_name,
                     **self.llm_model_kwargs,
                 )
             )

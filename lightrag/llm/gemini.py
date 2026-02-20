@@ -443,11 +443,9 @@ async def gemini_model_complete(
     **kwargs: Any,
 ) -> str | AsyncIterator[str]:
     hashing_kv = kwargs.get("hashing_kv")
-    model_name = None
-    if hashing_kv is not None:
+    model_name = kwargs.pop("model_name", None)
+    if model_name is None and hashing_kv is not None:
         model_name = hashing_kv.global_config.get("llm_model_name")
-    if model_name is None:
-        model_name = kwargs.pop("model_name", None)
     if model_name is None:
         raise ValueError("Gemini model name not provided in configuration.")
 

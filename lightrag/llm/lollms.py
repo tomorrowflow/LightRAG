@@ -120,7 +120,7 @@ async def lollms_model_complete(
     keyword_extraction = kwargs.pop("keyword_extraction", None)
 
     # Get model name from config
-    model_name = kwargs["hashing_kv"].global_config["llm_model_name"]
+    model_name = kwargs.pop("model_name", None) or kwargs["hashing_kv"].global_config["llm_model_name"]
 
     # If keyword extraction is needed, we might need to modify the prompt
     # or add specific parameters for JSON output (if lollms supports it)

@@ -626,7 +626,7 @@ async def openai_complete(
 ) -> Union[str, AsyncIterator[str]]:
     if history_messages is None:
         history_messages = []
-    model_name = kwargs["hashing_kv"].global_config["llm_model_name"]
+    model_name = kwargs.pop("model_name", None) or kwargs["hashing_kv"].global_config["llm_model_name"]
     return await openai_complete_if_cache(
         model_name,
         prompt,

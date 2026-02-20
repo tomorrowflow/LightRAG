@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LightRAG is a Retrieval-Augmented Generation (RAG) framework that uses graph-based knowledge representation for enhanced information retrieval. The system extracts entities and relationships from documents, builds a knowledge graph, and uses multi-modal retrieval (local, global, hybrid, mix, naive) for queries.
 
+**This is a fork** of [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG) (`upstream` remote). The `origin` remote points to `tomorrowflow/LightRAG`. The fork adds RAGAnything integration, a retrieval-specific LLM option, a Scheme Manager UI, and various fixes. See [Fork-Specific Changes](#fork-specific-changes) below.
+
 ## Core Architecture
 
 ### Key Components
@@ -76,22 +78,19 @@ lightrag-gunicorn                                         # Multi-worker (gunico
 
 ### Testing
 ```bash
-# Run offline tests (default)
-python -m pytest tests
-
-# Run integration tests (requires external services)
-python -m pytest tests --run-integration
-# Or set: LIGHTRAG_RUN_INTEGRATION=true
-
-# Run specific test file
-python test_graph_storage.py
-
-# Keep artifacts for debugging
-python -m pytest tests --keep-artifacts
-
-# Run with custom workers
-python -m pytest tests --test-workers 4
+pytest tests                          # Offline tests only (default)
+pytest tests --run-integration        # Include integration tests (requires external services)
+pytest tests/test_chunking.py         # Run specific test file
+pytest tests --keep-artifacts         # Keep temp dirs for debugging
+pytest tests --test-workers 4         # Custom parallel workers (default: 3)
+pytest tests --stress-test            # Enable stress test mode
 ```
+
+Pytest is configured with `asyncio_mode = "auto"` — async test functions are automatically detected (no `@pytest.mark.asyncio` needed).
+
+Environment variable overrides: `LIGHTRAG_RUN_INTEGRATION`, `LIGHTRAG_KEEP_ARTIFACTS`, `LIGHTRAG_TEST_WORKERS`, `LIGHTRAG_STRESS_TEST`.
+
+Test markers: `offline`, `integration`, `requires_db`, `requires_api`.
 
 ### Linting
 ```bash
@@ -262,34 +261,59 @@ Each LightRAG instance can use a `workspace` parameter for data isolation. Imple
 - Relational DB: workspace column filtering
 - Qdrant: payload-based partitioning
 
-## Testing Guidelines
+## Fork-Specific Changes
 
-### Test Structure
-- `tests/`: Main test suite (mirrors feature folders)
-- `test_*.py` in root: Specific integration tests
-- Markers: `offline`, `integration`, `requires_db`, `requires_api`
+This fork (`tomorrowflow/LightRAG`) diverges from upstream (`HKUDS/LightRAG`) in the following ways:
 
-### Running Tests
-```bash
-# Default: runs only offline tests
-pytest tests
+### RAGAnything / Multimodal Content Integration
 
-# Include integration tests
-pytest tests --run-integration
+- **`lightrag/ragmanager.py`** (new): Singleton `RAGManager` holding a global reference to a RAGAnything instance for multimodal processing.
+- **`lightrag/base.py`**: Added `READY` and `HANDLING` doc statuses. Added `multimodal_content` and `scheme_name` fields to `DocProcessingStatus`.
+- **`lightrag/lightrag.py`**: `insert()`/`ainsert()` accept `multimodal_content` and `scheme_name` params. After text processing, if multimodal content exists, `RAGManager._process_multimodal_content()` is called before marking as `PROCESSED`.
+- **`raganything`** submodule: Expected at `./raganything/` as a local dependency (configured in `pyproject.toml` under `[tool.uv.sources]`).
 
-# Keep test artifacts for debugging
-pytest tests --keep-artifacts
+### Retrieval-Specific LLM
 
-# Configure test workers
-pytest tests --test-workers 4
-```
+- **`lightrag/lightrag.py`**: New `retrieval_llm_model_func` field allows a separate LLM for query operations (falls back to `llm_model_func`). New `retrieval_llm_model_name` field (env: `RETRIEVAL_LLM_MODEL`) is baked into the retrieval function's `partial()` wrapper via `model_name` kwarg, so LLM bindings use the correct model name.
+- **`lightrag/operate.py`**: `kg_query`, `extract_keywords_only`, and `naive_query` use `retrieval_llm_model_func` when available.
+- **LLM bindings** (`ollama.py`, `openai.py`, `anthropic.py`, `bedrock.py`, `hf.py`, `lollms.py`, `gemini.py`): All check for a `model_name` kwarg before falling back to `global_config["llm_model_name"]`.
 
-### Environment Variables for Tests
-Set `LIGHTRAG_*` variables for integration tests:
-- `LIGHTRAG_RUN_INTEGRATION=true`
-- `LIGHTRAG_KEEP_ARTIFACTS=true`
-- `LIGHTRAG_TEST_WORKERS=4`
-- Plus storage-specific connection strings
+### Scheme Manager (WebUI)
+
+- **`lightrag_webui/src/components/documents/SchemeManager/`** (new): Dialog UI for managing processing "schemes" — configurations that select between LightRAG and RAGAnything frameworks, extraction tools (MinerU/Docling), and model sources.
+- **`lightrag_webui/src/contexts/SchemeContext.tsx`** (new): React context for sharing selected scheme across the UI.
+- **`lightrag_webui/src/api/lightrag.ts`**: Added `Scheme` type and CRUD API methods (`getSchemes`, `saveSchemes`, `addScheme`, `deleteScheme`) hitting `/documents/schemes` endpoints.
+
+### File Lifecycle on Insert
+
+- **`lightrag/lightrag.py`**: New `input_dir` field (env: `INPUT_DIR`, default `./inputs`). After enqueuing, source files are moved from `input_dir` into an `__enqueued__` subdirectory with collision-safe naming.
+
+### Parse Cache Cleanup
+
+- **`lightrag/lightrag.py`**: New methods `aclean_parse_cache_by_doc_ids()`, `clean_parse_cache_by_doc_ids()`, `aclean_all_parse_cache()`, `clean_all_parse_cache()` for removing cached parsing results from `kv_store_parse_cache.json`.
+
+### PostgreSQL Conditional pgvector
+
+- **`lightrag/kg/postgres_impl.py`**: `POSTGRES_ENABLE_VECTOR` env var / config option. When `false`, skips creating the vector extension and `register_vector`. `PGVectorStorage` raises an explicit error if used with vector disabled.
+
+### Bug Fixes (vs. upstream)
+
+- **Entity merge preserves existing data** (`operate.py`): `merge_nodes_and_edges` now fetches existing entities/relations before merging, preventing data loss on re-processing.
+- **Chinese space removal guard** (`utils.py`): The Chinese-specific space-stripping regex in `normalize_extracted_info` is now conditional on detecting Chinese characters, preventing mangling of English text like "AI Framework".
+- **Ollama embedding robustness** (`llm/ollama.py`): Empty/whitespace texts replaced with placeholder, NaN embeddings replaced with zeros, retry decorator added to `ollama_embed()`.
+- **Ollama retry policy**: Increased from 3 to 5 attempts, max wait from 10s to 60s, added `ResponseError` to retryable exceptions.
+- **Typo fixes**: `seperator` → `separator`, `descpriton` → `description`, `seperate` → `separate`.
+
+### Docker / Deployment
+
+- **Dockerfile**: Copies local `RAG-Anything/` into the build, installs system deps for MinerU/OpenCV (`libgl1`, `libglib2.0-0`, X11 libs).
+- **`docker-compose.yaml`**: Multi-service architecture with PostgreSQL, Neo4j, and vLLM reranker services. Separate vision model host configuration.
+- **`lightrag/utils.py`**: `.env` path hardcoded to `/app/.env` for Docker convention. **Note**: This may need adjustment for non-Docker development.
+
+### Build / Dependency Changes
+
+- **`pyproject.toml`**: Added `onnxruntime` as core dep. New `offline-docs` extra with `raganything` and document processing libs. Local `raganything` source in `[tool.uv.sources]`. Added `[tool.uv]` prerelease config.
+- **`uv.lock`** removed from `.gitignore` (tracked in repo).
 
 ## Code Style
 
