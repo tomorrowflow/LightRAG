@@ -13,6 +13,10 @@ venv/
 
 # Enviroment Variable Files
 .env
+.env.backup.*
+
+# Generated Docker Compose files (output of setup wizard)
+docker-compose.*.yml
 
 # Build / Distribution
 dist/
@@ -78,3 +82,6 @@ memory-bank
 # Claude Code
 CLAUDE.md
 /raganything
+
+# Google Jules
+.jules/

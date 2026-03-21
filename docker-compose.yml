@@ -26,11 +26,12 @@ services:
       dockerfile: Dockerfile
     container_name: lightrag
     ports:
-      - "9621:9621"
+      - "${HOST:-0.0.0.0}:${PORT:-9621}:9621"
     volumes:
       # Persistent storage
       - ./data/rag_storage:/app/data/rag_storage
       - ./data/inputs:/app/data/inputs
+<<<<<<< HEAD
       - ./data/outputs:/app/data/outputs
       - ./data/tiktoken:/app/data/tiktoken
       # Configuration files
