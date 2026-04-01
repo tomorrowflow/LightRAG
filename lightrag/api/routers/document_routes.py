@@ -4,9 +4,11 @@ This module contains all document-related routes for the LightRAG API.
 
 import asyncio
 import json
+import time
 import uuid
+from uuid import uuid4
 from functools import lru_cache
-from lightrag.utils import logger, get_pinyin_sort_key
+from lightrag.utils import logger, get_pinyin_sort_key, performance_timing_log
 import aiofiles
 import traceback
 from datetime import datetime, timezone
@@ -1097,12 +1099,13 @@ def _extract_pdf_pypdf(file_bytes: bytes, password: str = None) -> str:
 
     # Check if PDF is encrypted
     if reader.is_encrypted:
-        if not password:
-            raise Exception("PDF is encrypted but no password provided")
-
-        decrypt_result = reader.decrypt(password)
+        # Try empty password first (covers permission-only encrypted PDFs)
+        decrypt_result = reader.decrypt(password or "")
         if decrypt_result == 0:
-            raise Exception("Incorrect PDF password")
+            if password:
+                raise Exception("Incorrect PDF password")
+            else:
+                raise Exception("PDF is encrypted but no password provided")
 
     # Extract text from all pages
     content = ""
@@ -1347,7 +1350,8 @@ async def pipeline_enqueue_file(
 
         # Get file size for error reporting
         try:
-            file_size = file_path.stat().st_size
+            stat = await asyncio.to_thread(file_path.stat)
+            file_size = stat.st_size
         except Exception:
             file_size = 0
 
@@ -1438,8 +1442,8 @@ async def pipeline_enqueue_file(
                     | ".less"
                 ):
                     try:
-                        # Try to decode as UTF-8
-                        content = file.decode("utf-8")
+                        # Try to decode as UTF-8 (offloaded to thread to avoid blocking the event loop)
+                        content = await asyncio.to_thread(file.decode, "utf-8")
 
                         # Validate content
                         if not content or len(content.strip()) == 0:
@@ -1709,7 +1713,7 @@ async def pipeline_enqueue_file(
                 # Move file to __enqueued__ directory after enqueuing
                 try:
                     enqueued_dir = file_path.parent / "__enqueued__"
-                    enqueued_dir.mkdir(exist_ok=True)
+                    await asyncio.to_thread(enqueued_dir.mkdir, exist_ok=True)
 
                     # Generate unique filename to avoid conflicts
                     unique_filename = get_unique_filename_in_enqueued(
@@ -1718,7 +1722,7 @@ async def pipeline_enqueue_file(
                     target_path = enqueued_dir / unique_filename
 
                     # Move the file
-                    file_path.rename(target_path)
+                    await asyncio.to_thread(file_path.rename, target_path)
                     logger.debug(
                         f"Moved file to enqueued directory: {file_path.name} -> {unique_filename}"
                     )
@@ -3794,38 +3798,92 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving documents (500).
         """
-        try:
-            logger.info(f"[PAGINATED] Endpoint called - page={request.page}, page_size={request.page_size}, status_filter={request.status_filter}, sort_field={request.sort_field}, sort_direction={request.sort_direction}")
-            # Get paginated documents and status counts in parallel
-            logger.debug(f"[PAGINATED] Starting parallel database queries...")
-            
-            try:
-                docs_task = rag.doc_status.get_docs_paginated(
-                    status_filter=request.status_filter,
-                    page=request.page,
-                    page_size=request.page_size,
-                    sort_field=request.sort_field,
-                    sort_direction=request.sort_direction,
-                )
-                logger.debug(f"[PAGINATED] Created get_docs_paginated task")
-                
-                status_counts_task = rag.doc_status.get_all_status_counts()
-                logger.debug(f"[PAGINATED] Created get_all_status_counts task")
+        trace_id = uuid4().hex[:8]
+        request_start = time.perf_counter()
+        status_filter_value = (
+            request.status_filter.value if request.status_filter is not None else None
+        )
 
-                # Execute both queries in parallel
-                logger.debug(f"[PAGINATED] Executing asyncio.gather for parallel queries...")
-                (documents_with_ids, total_count), status_counts = await asyncio.gather(
-                    docs_task, status_counts_task
+        performance_timing_log(
+            "[documents/paginated][%s] Request start workspace=%s status_filter=%s page=%s page_size=%s sort_field=%s sort_direction=%s",
+            trace_id,
+            rag.workspace,
+            status_filter_value,
+            request.page,
+            request.page_size,
+            request.sort_field,
+            request.sort_direction,
+        )
+
+        try:
+
+            async def _timed_call(operation_name: str, operation):
+                operation_start = time.perf_counter()
+                performance_timing_log(
+                    "[documents/paginated][%s] %s started",
+                    trace_id,
+                    operation_name,
                 )
-                logger.info(f"[PAGINATED] Database queries completed - retrieved {len(documents_with_ids)} documents, total_count={total_count}, status_counts={status_counts}")
-            except Exception as db_error:
-                logger.error(f"[PAGINATED] Database query failed: {str(db_error)}")
-                logger.error(f"[PAGINATED] Database error type: {type(db_error).__name__}")
-                logger.error(traceback.format_exc())
-                raise
+                try:
+                    result = await operation
+                except Exception:
+                    elapsed = time.perf_counter() - operation_start
+                    performance_timing_log(
+                        "[documents/paginated][%s] %s failed after %.4fs",
+                        trace_id,
+                        operation_name,
+                        elapsed,
+                    )
+                    raise
+
+                elapsed = time.perf_counter() - operation_start
+                performance_timing_log(
+                    "[documents/paginated][%s] %s completed in %.4fs",
+                    trace_id,
+                    operation_name,
+                    elapsed,
+                )
+                return result
+
+            query_task_create_start = time.perf_counter()
+            docs_task = asyncio.create_task(
+                _timed_call(
+                    "get_docs_paginated",
+                    rag.doc_status.get_docs_paginated(
+                        status_filter=request.status_filter,
+                        page=request.page,
+                        page_size=request.page_size,
+                        sort_field=request.sort_field,
+                        sort_direction=request.sort_direction,
+                    ),
+                )
+            )
+            status_counts_task = asyncio.create_task(
+                _timed_call(
+                    "get_all_status_counts",
+                    rag.doc_status.get_all_status_counts(),
+                )
+            )
+            query_task_create_elapsed = time.perf_counter() - query_task_create_start
+            performance_timing_log(
+                "[documents/paginated][%s] Query tasks created in %.4fs",
+                trace_id,
+                query_task_create_elapsed,
+            )
+
+            query_await_start = time.perf_counter()
+            (documents_with_ids, total_count), status_counts = await asyncio.gather(
+                docs_task, status_counts_task
+            )
+            query_await_elapsed = time.perf_counter() - query_await_start
+            performance_timing_log(
+                "[documents/paginated][%s] Query tasks awaited in %.4fs",
+                trace_id,
+                query_await_elapsed,
+            )
 
             # Convert documents to response format
-            logger.debug(f"[PAGINATED] Starting document response serialization for {len(documents_with_ids)} documents...")
+            response_assembly_start = time.perf_counter()
             doc_responses = []
             for idx, (doc_id, doc) in enumerate(documents_with_ids):
                 try:
@@ -3866,24 +3924,41 @@ def create_document_routes(
                 has_next=has_next,
                 has_prev=has_prev,
             )
-            logger.debug(f"[PAGINATED] Pagination calculated - total_pages={total_pages}, has_next={has_next}, has_prev={has_prev}")
-
-            logger.debug(f"[PAGINATED] Building final response...")
             response = PaginatedDocsResponse(
                 documents=doc_responses,
                 pagination=pagination,
                 status_counts=status_counts,
             )
-            logger.info(f"[PAGINATED] Request completed successfully - returning {len(doc_responses)} documents")
+            response_assembly_elapsed = time.perf_counter() - response_assembly_start
+            total_elapsed = time.perf_counter() - request_start
+
+            performance_timing_log(
+                "[documents/paginated][%s] Response assembled in %.4fs",
+                trace_id,
+                response_assembly_elapsed,
+            )
+            performance_timing_log(
+                "[documents/paginated][%s] Request completed in %.4fs returned_rows=%s total_count=%s status_count_keys=%s",
+                trace_id,
+                total_elapsed,
+                len(doc_responses),
+                total_count,
+                sorted(status_counts.keys()),
+            )
+
             return response
 
         except HTTPException:
             # Re-raise HTTPException as-is
             raise
         except Exception as e:
-            logger.error(f"[PAGINATED] Unexpected error in paginated endpoint: {str(e)}")
-            logger.error(f"[PAGINATED] Error type: {type(e).__name__}")
-            logger.error(f"[PAGINATED] Full traceback:")
+            total_elapsed = time.perf_counter() - request_start
+            performance_timing_log(
+                "[documents/paginated][%s] Request failed after %.4fs",
+                trace_id,
+                total_elapsed,
+            )
+            logger.error(f"Error getting paginated documents: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 

@@ -2318,15 +2318,16 @@ def extract_queries(file_path):
 
 ## ⭐ Star 历史
 
-<a href="https://www.star-history.com/?repos=HKUDS%2FLightRAG&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=HKUDS/LightRAG&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=HKUDS/LightRAG&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=HKUDS/LightRAG&type=date&legend=top-left" />
- </picture>
-</a>
+[![Star History Chart](https://api.star-history.com/svg?repos=HKUDS/LightRAG&type=Date)](https://star-history.com/#HKUDS/LightRAG&Date)
 
 ## 🤝 贡献
+
+<div align="center">
+  我们欢迎各种形式的贡献——Bug 修复、新功能、文档改进等。<br>
+  提交 Pull Request 前，请阅读 <a href=".github/CONTRIBUTING.md"><strong>贡献指南</strong></a>。
+</div>
+
+<br>
 
 <div align="center">
   我们感谢所有贡献者做出的宝贵贡献。

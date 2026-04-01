@@ -1,1 +1,1 @@
-__api_version__ = "0276"
+from .._version import __api_version__ as __api_version__

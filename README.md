@@ -1379,7 +1379,6 @@ python examples/graph_visual_with_opensearch.py
 python examples/graph_visual_with_opensearch.py --html
 ```
 
-
 </details>
 
 ### Data Isolation Between LightRAG Instances
@@ -2319,15 +2318,16 @@ def extract_queries(file_path):
 
 ## ⭐ Star History
 
-<a href="https://www.star-history.com/?repos=HKUDS%2FLightRAG&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=HKUDS/LightRAG&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=HKUDS/LightRAG&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=HKUDS/LightRAG&type=date&legend=top-left" />
- </picture>
-</a>
+[![Star History Chart](https://api.star-history.com/svg?repos=HKUDS/LightRAG&type=Date)](https://star-history.com/#HKUDS/LightRAG&Date)
 
 ## 🤝 Contribution
+
+<div align="center">
+  We welcome contributions of all kinds — bug fixes, new features, documentation improvements, and more.<br>
+  Please read our <a href=".github/CONTRIBUTING.md"><strong>Contributing Guide</strong></a> before submitting a pull request.
+</div>
+
+<br>
 
 <div align="center">
   We thank all our contributors for their valuable contributions.
