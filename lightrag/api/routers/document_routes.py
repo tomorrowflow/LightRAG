@@ -310,6 +310,7 @@ class InsertTextRequest(BaseModel):
     Attributes:
         text: The text content to be inserted into the RAG system
         file_source: Source of the text (optional)
+        id: Explicit document ID (optional). When provided, duplicate checks are skipped.
     """
 
     text: str = Field(
@@ -318,6 +319,10 @@ class InsertTextRequest(BaseModel):
     )
     file_source: Optional[str] = Field(
         default=None, min_length=0, description="File Source"
+    )
+    id: Optional[str] = Field(
+        default=None,
+        description="Explicit document ID. When set, duplicate checks are skipped.",
     )
 
     @field_validator("text", mode="after")
@@ -335,6 +340,7 @@ class InsertTextRequest(BaseModel):
             "example": {
                 "text": "This is a sample text to be inserted into the RAG system.",
                 "file_source": "Source of the text (optional)",
+                "id": "bone:person:florian-wolf (optional)",
             }
         }
     )
@@ -346,6 +352,7 @@ class InsertTextsRequest(BaseModel):
     Attributes:
         texts: List of text contents to be inserted into the RAG system
         file_sources: Sources of the texts (optional)
+        ids: Explicit document IDs (optional). Must match length of texts if provided.
     """
 
     texts: list[str] = Field(
@@ -354,6 +361,10 @@ class InsertTextsRequest(BaseModel):
     )
     file_sources: Optional[list[str]] = Field(
         default=None, min_length=0, description="Sources of the texts"
+    )
+    ids: Optional[list[str]] = Field(
+        default=None,
+        description="Explicit document IDs. Must match length of texts. When set, duplicate checks are skipped.",
     )
 
     @field_validator("texts", mode="after")
@@ -1941,6 +1952,7 @@ async def pipeline_index_texts(
     texts: List[str],
     file_sources: List[str] = None,
     track_id: str = None,
+    ids: List[str] = None,
 ):
     """Index a list of texts with track_id
 
@@ -1949,6 +1961,7 @@ async def pipeline_index_texts(
         texts: The texts to index
         file_sources: Sources of the texts
         track_id: Optional tracking ID
+        ids: Optional explicit document IDs (passed through to apipeline_enqueue_documents)
     """
     if not texts:
         return
@@ -1966,7 +1979,7 @@ async def pipeline_index_texts(
             )
 
     await rag.apipeline_enqueue_documents(
-        input=texts, file_paths=normalized_file_sources, track_id=track_id
+        input=texts, file_paths=normalized_file_sources, track_id=track_id, ids=ids
     )
     await rag.apipeline_process_enqueue_documents()
 
@@ -2928,39 +2941,43 @@ def create_document_routes(
             HTTPException: If an error occurs during text processing (500).
         """
         try:
-            # Check if file_source already exists in doc_status storage
-            if (
-                request.file_source
-                and request.file_source.strip()
-                and request.file_source != "unknown_source"
-            ):
-                existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+            # When an explicit ID is provided, skip duplicate checks entirely.
+            # This supports bone-by-bone skeleton sync where delete+re-insert
+            # with the same ID is intentional.
+            if not request.id:
+                # Check if file_source already exists in doc_status storage
+                if (
                     request.file_source
-                )
-                if existing_doc_data:
-                    # Get document status and track_id from existing document
-                    status = existing_doc_data.get("status", "unknown")
-                    # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
-                    existing_track_id = existing_doc_data.get("track_id") or ""
+                    and request.file_source.strip()
+                    and request.file_source != "unknown_source"
+                ):
+                    existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+                        request.file_source
+                    )
+                    if existing_doc_data:
+                        # Get document status and track_id from existing document
+                        status = existing_doc_data.get("status", "unknown")
+                        # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
+                        existing_track_id = existing_doc_data.get("track_id") or ""
+                        return InsertResponse(
+                            status="duplicated",
+                            message=f"File source '{request.file_source}' already exists in document storage (Status: {status}).",
+                            track_id=existing_track_id,
+                        )
+
+                # Check if content already exists by computing content hash (doc_id)
+                sanitized_text = sanitize_text_for_encoding(request.text)
+                content_doc_id = compute_mdhash_id(sanitized_text, prefix="doc-")
+                existing_doc = await rag.doc_status.get_by_id(content_doc_id)
+                if existing_doc:
+                    # Content already exists, return duplicated with existing track_id
+                    status = existing_doc.get("status", "unknown")
+                    existing_track_id = existing_doc.get("track_id") or ""
                     return InsertResponse(
                         status="duplicated",
-                        message=f"File source '{request.file_source}' already exists in document storage (Status: {status}).",
+                        message=f"Identical content already exists in document storage (doc_id: {content_doc_id}, Status: {status}).",
                         track_id=existing_track_id,
                     )
-
-            # Check if content already exists by computing content hash (doc_id)
-            sanitized_text = sanitize_text_for_encoding(request.text)
-            content_doc_id = compute_mdhash_id(sanitized_text, prefix="doc-")
-            existing_doc = await rag.doc_status.get_by_id(content_doc_id)
-            if existing_doc:
-                # Content already exists, return duplicated with existing track_id
-                status = existing_doc.get("status", "unknown")
-                existing_track_id = existing_doc.get("track_id") or ""
-                return InsertResponse(
-                    status="duplicated",
-                    message=f"Identical content already exists in document storage (doc_id: {content_doc_id}, Status: {status}).",
-                    track_id=existing_track_id,
-                )
 
             # Generate track_id for text insertion
             track_id = generate_track_id("insert")
@@ -2971,6 +2988,7 @@ def create_document_routes(
                 [request.text],
                 file_sources=[request.file_source],
                 track_id=track_id,
+                ids=[request.id] if request.id else None,
             )
 
             return InsertResponse(
@@ -3008,42 +3026,51 @@ def create_document_routes(
             HTTPException: If an error occurs during text processing (500).
         """
         try:
-            # Check if any file_sources already exist in doc_status storage
-            if request.file_sources:
-                for file_source in request.file_sources:
-                    if (
-                        file_source
-                        and file_source.strip()
-                        and file_source != "unknown_source"
-                    ):
-                        existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+            # When explicit IDs are provided, skip duplicate checks entirely.
+            if not request.ids:
+                # Check if any file_sources already exist in doc_status storage
+                if request.file_sources:
+                    for file_source in request.file_sources:
+                        if (
                             file_source
-                        )
-                        if existing_doc_data:
-                            # Get document status and track_id from existing document
-                            status = existing_doc_data.get("status", "unknown")
-                            # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
-                            existing_track_id = existing_doc_data.get("track_id") or ""
-                            return InsertResponse(
-                                status="duplicated",
-                                message=f"File source '{file_source}' already exists in document storage (Status: {status}).",
-                                track_id=existing_track_id,
+                            and file_source.strip()
+                            and file_source != "unknown_source"
+                        ):
+                            existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+                                file_source
                             )
+                            if existing_doc_data:
+                                # Get document status and track_id from existing document
+                                status = existing_doc_data.get("status", "unknown")
+                                # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
+                                existing_track_id = existing_doc_data.get("track_id") or ""
+                                return InsertResponse(
+                                    status="duplicated",
+                                    message=f"File source '{file_source}' already exists in document storage (Status: {status}).",
+                                    track_id=existing_track_id,
+                                )
 
-            # Check if any content already exists by computing content hash (doc_id)
-            for text in request.texts:
-                sanitized_text = sanitize_text_for_encoding(text)
-                content_doc_id = compute_mdhash_id(sanitized_text, prefix="doc-")
-                existing_doc = await rag.doc_status.get_by_id(content_doc_id)
-                if existing_doc:
-                    # Content already exists, return duplicated with existing track_id
-                    status = existing_doc.get("status", "unknown")
-                    existing_track_id = existing_doc.get("track_id") or ""
-                    return InsertResponse(
-                        status="duplicated",
-                        message=f"Identical content already exists in document storage (doc_id: {content_doc_id}, Status: {status}).",
-                        track_id=existing_track_id,
-                    )
+                # Check if any content already exists by computing content hash (doc_id)
+                for text in request.texts:
+                    sanitized_text = sanitize_text_for_encoding(text)
+                    content_doc_id = compute_mdhash_id(sanitized_text, prefix="doc-")
+                    existing_doc = await rag.doc_status.get_by_id(content_doc_id)
+                    if existing_doc:
+                        # Content already exists, return duplicated with existing track_id
+                        status = existing_doc.get("status", "unknown")
+                        existing_track_id = existing_doc.get("track_id") or ""
+                        return InsertResponse(
+                            status="duplicated",
+                            message=f"Identical content already exists in document storage (doc_id: {content_doc_id}, Status: {status}).",
+                            track_id=existing_track_id,
+                        )
+
+            # Validate ids length matches texts if provided
+            if request.ids and len(request.ids) != len(request.texts):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Number of ids ({len(request.ids)}) must match number of texts ({len(request.texts)})",
+                )
 
             # Generate track_id for texts insertion
             track_id = generate_track_id("insert")
@@ -3054,6 +3081,7 @@ def create_document_routes(
                 request.texts,
                 file_sources=request.file_sources,
                 track_id=track_id,
+                ids=request.ids,
             )
 
             return InsertResponse(
