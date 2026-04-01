@@ -60,6 +60,7 @@ from lightrag.constants import (
     DEFAULT_RELATED_CHUNK_NUMBER,
     DEFAULT_KG_CHUNK_PICK_METHOD,
     DEFAULT_ENTITY_TYPES,
+    DEFAULT_RELATIONSHIP_TYPES,
     DEFAULT_SUMMARY_LANGUAGE,
     SOURCE_IDS_LIMIT_METHOD_KEEP,
     SOURCE_IDS_LIMIT_METHOD_FIFO,
@@ -2936,6 +2937,19 @@ async def extract_entities(
     entity_types = global_config["addon_params"].get(
         "entity_types", DEFAULT_ENTITY_TYPES
     )
+    relationship_types = global_config["addon_params"].get(
+        "relationship_types", DEFAULT_RELATIONSHIP_TYPES
+    )
+
+    # Build optional relationship types prompt fragment
+    if relationship_types:
+        relationship_types_prompt = (
+            "\n            When applicable, prefer using one of the following relationship types "
+            "as keywords: `{relationship_types}`. "
+            "You may still use other keywords if none of the preferred types fit the relationship."
+        )
+    else:
+        relationship_types_prompt = ""
 
     examples = "\n".join(PROMPTS["entity_extraction_examples"])
 
@@ -2944,6 +2958,7 @@ async def extract_entities(
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
         entity_types=", ".join(entity_types),
         language=language,
+        relationship_types_prompt="",
     )
     # add example's format
     examples = examples.format(**example_context_base)
@@ -2954,6 +2969,11 @@ async def extract_entities(
         entity_types=",".join(entity_types),
         examples=examples,
         language=language,
+        relationship_types_prompt=relationship_types_prompt.format(
+            relationship_types=", ".join(relationship_types)
+        )
+        if relationship_types
+        else "",
     )
 
     processed_chunks = 0

@@ -49,6 +49,7 @@ from lightrag.constants import (
     DEFAULT_MAX_SOURCE_IDS_PER_ENTITY,
     DEFAULT_MAX_SOURCE_IDS_PER_RELATION,
     DEFAULT_ENTITY_TYPES,
+    DEFAULT_RELATIONSHIP_TYPES,
     DEFAULT_SUMMARY_LANGUAGE,
     DEFAULT_LLM_TIMEOUT,
     DEFAULT_EMBEDDING_TIMEOUT,
@@ -526,6 +527,9 @@ class LightRAG:
                 "SUMMARY_LANGUAGE", DEFAULT_SUMMARY_LANGUAGE, str
             ),
             "entity_types": get_env_value("ENTITY_TYPES", DEFAULT_ENTITY_TYPES, list),
+            "relationship_types": get_env_value(
+                "RELATIONSHIP_TYPES", DEFAULT_RELATIONSHIP_TYPES, list
+            ),
         }
     )
 

@@ -40,6 +40,9 @@ DEFAULT_ENTITY_TYPES = [
     "NaturalObject",
 ]
 
+# Default relationship types to prioritize during extraction (empty = no preference)
+DEFAULT_RELATIONSHIP_TYPES: list[str] = []
+
 # Separator for: description, source_id and relation-key fields(Can not be changed after data inserted)
 GRAPH_FIELD_SEP = "<SEP>"
 
