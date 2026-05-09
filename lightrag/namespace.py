@@ -21,6 +21,9 @@ class NameSpace:
 
     DOC_STATUS = "doc_status"
 
+    KV_STORE_PARSE_CACHE = "parse_cache"
+    KV_STORE_MULTIMODAL_STATUS = "multimodal_status"
+
 
 def is_namespace(namespace: str, base_namespace: str | Iterable[str]):
     if isinstance(base_namespace, str):

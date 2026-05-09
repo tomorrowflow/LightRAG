@@ -2331,6 +2331,18 @@ class PGKVStorage(BaseKVStorage):
             response["create_time"] = create_time
             response["update_time"] = create_time if update_time == 0 else update_time
 
+        if response and is_namespace(
+            self.namespace,
+            (NameSpace.KV_STORE_PARSE_CACHE, NameSpace.KV_STORE_MULTIMODAL_STATUS),
+        ):
+            data = response.get("data")
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except json.JSONDecodeError:
+                    data = {}
+            return data
+
         return response if response else None
 
     # Query by id
@@ -2634,6 +2646,16 @@ class PGKVStorage(BaseKVStorage):
                         current_time,
                     )
                 )
+                await _cooperative_yield(i)
+        elif is_namespace(self.namespace, NameSpace.KV_STORE_PARSE_CACHE):
+            upsert_sql = SQL_TEMPLATES["upsert_parse_cache"]
+            for i, (k, v) in enumerate(data.items(), start=1):
+                batch_values.append((self.workspace, k, json.dumps(v)))
+                await _cooperative_yield(i)
+        elif is_namespace(self.namespace, NameSpace.KV_STORE_MULTIMODAL_STATUS):
+            upsert_sql = SQL_TEMPLATES["upsert_multimodal_status"]
+            for i, (k, v) in enumerate(data.items(), start=1):
+                batch_values.append((self.workspace, k, json.dumps(v)))
                 await _cooperative_yield(i)
         else:
             logger.error(f"Unknown namespace: {self.namespace}")
@@ -6309,6 +6331,8 @@ NAMESPACE_TABLE_MAP = {
     NameSpace.VECTOR_STORE_ENTITIES: "LIGHTRAG_VDB_ENTITY",
     NameSpace.VECTOR_STORE_RELATIONSHIPS: "LIGHTRAG_VDB_RELATION",
     NameSpace.DOC_STATUS: "LIGHTRAG_DOC_STATUS",
+    NameSpace.KV_STORE_PARSE_CACHE: "LIGHTRAG_PARSE_CACHE",
+    NameSpace.KV_STORE_MULTIMODAL_STATUS: "LIGHTRAG_MULTIMODAL_STATUS",
 }
 
 
@@ -6464,6 +6488,26 @@ TABLES = {
                     create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
                     update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
                     CONSTRAINT LIGHTRAG_RELATION_CHUNKS_PK PRIMARY KEY (workspace, id)
+                    )"""
+    },
+    "LIGHTRAG_PARSE_CACHE": {
+        "ddl": """CREATE TABLE LIGHTRAG_PARSE_CACHE (
+                    id VARCHAR(1024),
+                    workspace VARCHAR(255),
+                    data JSONB,
+                    create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT LIGHTRAG_PARSE_CACHE_PK PRIMARY KEY (workspace, id)
+                    )"""
+    },
+    "LIGHTRAG_MULTIMODAL_STATUS": {
+        "ddl": """CREATE TABLE LIGHTRAG_MULTIMODAL_STATUS (
+                    id VARCHAR(1024),
+                    workspace VARCHAR(255),
+                    data JSONB,
+                    create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT LIGHTRAG_MULTIMODAL_STATUS_PK PRIMARY KEY (workspace, id)
                     )"""
     },
 }
@@ -6677,4 +6721,20 @@ SQL_TEMPLATES = {
     "drop_specifiy_table_workspace": """
         DELETE FROM {table_name} WHERE workspace=$1
        """,
+    # Generic JSON KV — parse cache
+    "get_by_id_parse_cache": """SELECT id, data FROM LIGHTRAG_PARSE_CACHE WHERE workspace=$1 AND id=$2""",
+    "get_by_ids_parse_cache": """SELECT id, data FROM LIGHTRAG_PARSE_CACHE WHERE workspace=$1 AND id = ANY($2)""",
+    "upsert_parse_cache": """INSERT INTO LIGHTRAG_PARSE_CACHE(workspace, id, data, create_time, update_time)
+                              VALUES($1, $2, $3::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                              ON CONFLICT(workspace, id) DO UPDATE SET
+                              data = EXCLUDED.data,
+                              update_time = CURRENT_TIMESTAMP""",
+    # Generic JSON KV — multimodal status
+    "get_by_id_multimodal_status": """SELECT id, data FROM LIGHTRAG_MULTIMODAL_STATUS WHERE workspace=$1 AND id=$2""",
+    "get_by_ids_multimodal_status": """SELECT id, data FROM LIGHTRAG_MULTIMODAL_STATUS WHERE workspace=$1 AND id = ANY($2)""",
+    "upsert_multimodal_status": """INSERT INTO LIGHTRAG_MULTIMODAL_STATUS(workspace, id, data, create_time, update_time)
+                                   VALUES($1, $2, $3::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                   ON CONFLICT(workspace, id) DO UPDATE SET
+                                   data = EXCLUDED.data,
+                                   update_time = CURRENT_TIMESTAMP""",
 }
