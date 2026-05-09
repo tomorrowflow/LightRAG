@@ -174,7 +174,10 @@ async def ollama_model_complete(
 
 
 @wrap_embedding_func_with_attrs(
-    embedding_dim=1024, max_token_size=8192, model_name="bge-m3:latest"
+    embedding_dim=1024,
+    max_token_size=8192,
+    model_name="bge-m3:latest",
+    supports_asymmetric=True,
 )
 @retry(
     stop=stop_after_attempt(5),  # Increase from 3 to 5 attempts
@@ -187,6 +190,9 @@ async def ollama_embed(
     texts: list[str],
     embed_model: str = "bge-m3:latest",
     max_token_size: int | None = None,
+    context: str = "document",
+    query_prefix: str | None = None,
+    document_prefix: str | None = None,
     **kwargs,
 ) -> np.ndarray:
     """Generate embeddings using Ollama's API.
@@ -199,6 +205,11 @@ async def ollama_embed(
             signature supports it (via inspect.signature check). Ollama will
             automatically truncate texts exceeding the model's context length
             (num_ctx), so no client-side truncation is needed.
+        context: The embedding context - "query" for search queries, "document" for indexed content.
+            **IMPORTANT**: This parameter is automatically injected by the EmbeddingFunc wrapper
+            when supports_asymmetric=True. Default is "document".
+        query_prefix: Optional prefix to prepend to texts when context="query" (e.g., "search_query: ").
+        document_prefix: Optional prefix to prepend to texts when context="document" (e.g., "search_document: ").
         **kwargs: Additional arguments passed to the Ollama client.
 
     Returns:
@@ -208,6 +219,12 @@ async def ollama_embed(
         - Ollama API automatically truncates texts exceeding the model's context length
         - The max_token_size parameter is received but not used for client-side truncation
     """
+    # Apply context-based prefixes if provided
+    if context == "query" and query_prefix:
+        texts = [query_prefix + text for text in texts]
+    elif context == "document" and document_prefix:
+        texts = [document_prefix + text for text in texts]
+
     _ = max_token_size  # Acknowledge parameter to avoid unused variable warning
 
     # Input validation: Check for empty or whitespace-only texts

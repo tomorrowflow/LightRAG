@@ -157,7 +157,16 @@
       "showButton": "Show",
       "hideButton": "Hide",
       "showFileNameTooltip": "Show file name",
-      "hideFileNameTooltip": "Hide file name"
+      "hideFileNameTooltip": "Hide file name",
+      "details": {
+        "title": "Status Details",
+        "openTooltip": "View status details",
+        "content": "Details",
+        "copyButton": "Copy",
+        "copyTooltip": "Copy status details",
+        "copySuccess": "Status details copied",
+        "copyFailed": "Failed to copy status details"
+      }
     },
     "pipelineStatus": {
       "title": "Pipeline Status",
@@ -337,7 +346,7 @@
         "properties": "Properties",
         "relationships": "Relations(within subgraph)",
         "expandNode": "Expand Node",
-        "pruneNode": "Prune Node",
+        "pruneNode": "Hide Node",
         "deleteAllNodesError": "Refuse to delete all nodes in the graph",
         "nodesRemoved": "{{count}} nodes removed, including orphan nodes",
         "noNewNodes": "No expandable nodes found",

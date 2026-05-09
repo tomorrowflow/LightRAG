@@ -157,7 +157,16 @@
       "showButton": "عرض",
       "hideButton": "إخفاء",
       "showFileNameTooltip": "عرض اسم الملف",
-      "hideFileNameTooltip": "إخفاء اسم الملف"
+      "hideFileNameTooltip": "إخفاء اسم الملف",
+      "details": {
+        "title": "تفاصيل الحالة",
+        "openTooltip": "عرض تفاصيل الحالة",
+        "content": "التفاصيل",
+        "copyButton": "نسخ",
+        "copyTooltip": "نسخ تفاصيل الحالة",
+        "copySuccess": "تم نسخ تفاصيل الحالة",
+        "copyFailed": "فشل نسخ تفاصيل الحالة"
+      }
     },
     "pipelineStatus": {
       "title": "حالة خط الأنابيب",
@@ -337,7 +346,7 @@
         "properties": "الخصائص",
         "relationships": "العلاقات (داخل الرسم الفرعي)",
         "expandNode": "توسيع العقدة",
-        "pruneNode": "تقليم العقدة",
+        "pruneNode": "إخفاء العقدة",
         "deleteAllNodesError": "رفض حذف جميع العقد في الرسم البياني",
         "nodesRemoved": "تم إزالة {{count}} عقدة، بما في ذلك العقد اليتيمة",
         "noNewNodes": "لم يتم العثور على عقد قابلة للتوسيع",

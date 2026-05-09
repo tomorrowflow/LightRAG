@@ -153,7 +153,16 @@
       "showButton": "Anzeigen",
       "hideButton": "Ausblenden",
       "showFileNameTooltip": "Dateiname anzeigen",
-      "hideFileNameTooltip": "Dateiname ausblenden"
+      "hideFileNameTooltip": "Dateiname ausblenden",
+      "details": {
+        "title": "Statusdetails",
+        "openTooltip": "Statusdetails anzeigen",
+        "content": "Details",
+        "copyButton": "Kopieren",
+        "copyTooltip": "Statusdetails kopieren",
+        "copySuccess": "Statusdetails kopiert",
+        "copyFailed": "Statusdetails konnten nicht kopiert werden"
+      }
     },
     "pipelineStatus": {
       "title": "Pipeline-Status",
@@ -333,7 +342,7 @@
         "properties": "Eigenschaften",
         "relationships": "Beziehungen (innerhalb des Teilgraphen)",
         "expandNode": "Knoten erweitern",
-        "pruneNode": "Knoten beschneiden",
+        "pruneNode": "Knoten ausblenden",
         "deleteAllNodesError": "Löschen aller Knoten im Graph verweigert",
         "nodesRemoved": "{{count}} Knoten entfernt, einschließlich verwaister Knoten",
         "noNewNodes": "Keine erweiterbaren Knoten gefunden",

@@ -153,7 +153,16 @@
       "showButton": "表示",
       "hideButton": "非表示",
       "showFileNameTooltip": "ファイル名を表示",
-      "hideFileNameTooltip": "ファイル名を非表示"
+      "hideFileNameTooltip": "ファイル名を非表示",
+      "details": {
+        "title": "ステータス詳細",
+        "openTooltip": "ステータス詳細を表示",
+        "content": "詳細",
+        "copyButton": "コピー",
+        "copyTooltip": "ステータス詳細をコピー",
+        "copySuccess": "ステータス詳細をコピーしました",
+        "copyFailed": "ステータス詳細のコピーに失敗しました"
+      }
     },
     "pipelineStatus": {
       "title": "パイプラインステータス",
@@ -333,7 +342,7 @@
         "properties": "プロパティ",
         "relationships": "関係（サブグラフ内）",
         "expandNode": "ノードを展開",
-        "pruneNode": "ノードを剪定",
+        "pruneNode": "ノードを非表示",
         "deleteAllNodesError": "グラフ内のすべてのノードを削除することを拒否します",
         "nodesRemoved": "{{count}}個のノードが削除されました（孤立ノードを含む）",
         "noNewNodes": "展開可能なノードが見つかりませんでした",

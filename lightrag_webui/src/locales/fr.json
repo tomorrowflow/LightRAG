@@ -157,7 +157,16 @@
       "showButton": "Afficher",
       "hideButton": "Masquer",
       "showFileNameTooltip": "Afficher le nom du fichier",
-      "hideFileNameTooltip": "Masquer le nom du fichier"
+      "hideFileNameTooltip": "Masquer le nom du fichier",
+      "details": {
+        "title": "Détails du statut",
+        "openTooltip": "Afficher les détails du statut",
+        "content": "Détails",
+        "copyButton": "Copier",
+        "copyTooltip": "Copier les détails du statut",
+        "copySuccess": "Détails du statut copiés",
+        "copyFailed": "Échec de la copie des détails du statut"
+      }
     },
     "pipelineStatus": {
       "title": "État du Pipeline",
@@ -337,7 +346,7 @@
         "properties": "Propriétés",
         "relationships": "Relations(dans le sous-graphe)",
         "expandNode": "Développer le nœud",
-        "pruneNode": "Élaguer le nœud",
+        "pruneNode": "Masquer le nœud",
         "deleteAllNodesError": "Refus de supprimer tous les nœuds du graphe",
         "nodesRemoved": "{{count}} nœuds supprimés, y compris les nœuds orphelins",
         "noNewNodes": "Aucun nœud développable trouvé",

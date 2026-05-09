@@ -153,7 +153,16 @@
       "showButton": "Показати",
       "hideButton": "Приховати",
       "showFileNameTooltip": "Показати ім'я файлу",
-      "hideFileNameTooltip": "Приховати ім'я файлу"
+      "hideFileNameTooltip": "Приховати ім'я файлу",
+      "details": {
+        "title": "Відомості про статус",
+        "openTooltip": "Показати відомості про статус",
+        "content": "Відомості",
+        "copyButton": "Копіювати",
+        "copyTooltip": "Копіювати відомості про статус",
+        "copySuccess": "Відомості про статус скопійовано",
+        "copyFailed": "Не вдалося скопіювати відомості про статус"
+      }
     },
     "pipelineStatus": {
       "title": "Статус пайплайну",
@@ -333,7 +342,7 @@
         "properties": "Властивості",
         "relationships": "Відношення (в межах підграфа)",
         "expandNode": "Розширити вузол",
-        "pruneNode": "Обрізати вузол",
+        "pruneNode": "Приховати вузол",
         "deleteAllNodesError": "Відмова видалити всі вузли в графі",
         "nodesRemoved": "{{count}} вузлів видалено, включаючи сирітські вузли",
         "noNewNodes": "Розширюваних вузлів не знайдено",

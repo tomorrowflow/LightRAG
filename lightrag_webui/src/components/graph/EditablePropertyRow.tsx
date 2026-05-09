@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { updateEntity, updateRelation, checkEntityNameExists } from '@/api/lightrag'
@@ -8,6 +8,12 @@ import { SearchHistoryManager } from '@/utils/SearchHistoryManager'
 import { PropertyName, EditIcon, PropertyValue } from './PropertyRowComponents'
 import PropertyEditDialog from './PropertyEditDialog'
 import MergeDialog from './MergeDialog'
+
+const createErrorWithCause = (message: string, cause: unknown): Error => {
+  const error = new Error(message) as Error & { cause?: unknown }
+  error.cause = cause
+  return error
+}
 
 /**
  * Interface for the EditablePropertyRow component props
@@ -51,6 +57,8 @@ const EditablePropertyRow = ({
   const [isEditing, setIsEditing] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [currentValue, setCurrentValue] = useState(initialValue)
+  const [draftValue, setDraftValue] = useState(String(initialValue))
+  const [draftAllowMerge, setDraftAllowMerge] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [mergeDialogOpen, setMergeDialogOpen] = useState(false)
   const [mergeDialogInfo, setMergeDialogInfo] = useState<{
@@ -58,12 +66,19 @@ const EditablePropertyRow = ({
     sourceEntity: string
   } | null>(null)
 
-  useEffect(() => {
+  // Sync currentValue when the incoming initialValue prop changes.
+  // Uses a render-time previous-value comparison instead of useEffect to avoid
+  // cascading renders flagged by react-hooks/set-state-in-effect.
+  const [previousInitialValue, setPreviousInitialValue] = useState(initialValue)
+  if (initialValue !== previousInitialValue) {
+    setPreviousInitialValue(initialValue)
     setCurrentValue(initialValue)
-  }, [initialValue])
+  }
 
   const handleEditClick = () => {
     if (isEditable && !isEditing) {
+      setDraftValue(String(currentValue))
+      setDraftAllowMerge(false)
       setIsEditing(true)
       setErrorMessage(null)
     }
@@ -74,7 +89,14 @@ const EditablePropertyRow = ({
     setErrorMessage(null)
   }
 
-  const handleSave = async (value: string, options?: { allowMerge?: boolean }) => {
+  const handleSave = async () => {
+    const value = draftValue.trim()
+    const allowMerge = draftAllowMerge
+
+    if (value === '') {
+      return
+    }
+
     if (isSubmitting || value === String(currentValue)) {
       setIsEditing(false)
       setErrorMessage(null)
@@ -87,7 +109,6 @@ const EditablePropertyRow = ({
     try {
       if (entityType === 'node' && entityId && nodeId) {
         let updatedData = { [name]: value }
-        const allowMerge = options?.allowMerge ?? false
 
         if (name === 'entity_id') {
           if (!allowMerge) {
@@ -132,7 +153,7 @@ const EditablePropertyRow = ({
                 .updateNodeAndSelect(nodeId, entityId, name, graphValue)
             } catch (error) {
               console.error('Error updating node in graph:', error)
-              throw new Error('Failed to update node in graph')
+              throw createErrorWithCause('Failed to update node in graph', error)
             }
 
             // Update search history: remove old name, add new name
@@ -201,7 +222,7 @@ const EditablePropertyRow = ({
           await useGraphStore.getState().updateEdgeAndSelect(edgeId, dynamicId, sourceId, targetId, name, value)
         } catch (error) {
           console.error(`Error updating edge ${sourceId}->${targetId} in graph:`, error)
-          throw new Error('Failed to update edge in graph')
+          throw createErrorWithCause('Failed to update edge in graph', error)
         }
         toast.success(t('graphPanel.propertiesView.success.relationUpdated'))
         setCurrentValue(value)
@@ -265,7 +286,10 @@ const EditablePropertyRow = ({
         onClose={handleCancel}
         onSave={handleSave}
         propertyName={name}
-        initialValue={String(currentValue)}
+        value={draftValue}
+        allowMerge={draftAllowMerge}
+        onValueChange={setDraftValue}
+        onAllowMergeChange={setDraftAllowMerge}
         isSubmitting={isSubmitting}
         errorMessage={errorMessage}
       />
