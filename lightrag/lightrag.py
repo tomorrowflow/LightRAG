@@ -1811,7 +1811,7 @@ class LightRAG:
             )(
                 partial(
                     self.retrieval_llm_model_func,  # type: ignore
-                    hashing_kv=hashing_kv,
+                    hashing_kv=self.llm_response_cache,
                     model_name=self.retrieval_llm_model_name or self.llm_model_name,
                     **self.llm_model_kwargs,
                 )
