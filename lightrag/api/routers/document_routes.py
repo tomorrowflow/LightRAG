@@ -2856,7 +2856,9 @@ def create_document_routes(
                             enable_equation_processing=True,
                         )
 
-                        # Create RAGAnything instance with the specific config
+                        # Create RAGAnything instance with the specific config,
+                        # then reuse the already-loaded parser from the global singleton
+                        # to avoid reloading MinerU/Docling on every upload.
                         rag_instance = RAGAnything(
                             lightrag=rag_anything.lightrag,
                             config=config,
@@ -2864,6 +2866,8 @@ def create_document_routes(
                             vision_model_func=rag_anything.vision_model_func,
                             embedding_func=rag_anything.embedding_func,
                         )
+                        if rag_anything.doc_parser is not None:
+                            rag_instance.doc_parser = rag_anything.doc_parser
 
                         # Process the document using the API-specific method
                         # that properly manages doc status transitions (READY → HANDLING → PROCESSED)
