@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 import os
 import re
+import warnings
 
 import pipmaster as pm
 
@@ -52,6 +53,34 @@ def _coerce_host_for_cloud_model(host: Optional[str], model: object) -> Optional
     return host
 
 
+def _normalize_ollama_response_format(kwargs: dict) -> None:
+    """Translate OpenAI-style response_format into Ollama's native format field.
+
+    Precedence: an explicit ``format`` value (Ollama's native field) wins over
+    ``response_format`` — if ``format`` is already set, ``response_format`` is
+    dropped silently. Otherwise, ``{"type": "json_object"}`` maps to
+    ``format="json"`` and any other payload is passed through unchanged so
+    callers can supply JSON schemas directly.
+    """
+
+    response_format = kwargs.pop("response_format", None)
+    if kwargs.get("format") is not None or response_format is None:
+        return
+
+    if isinstance(response_format, dict):
+        if response_format.get("type") == "json_object":
+            kwargs["format"] = "json"
+            return
+        if response_format.get("type") == "json_schema":
+            json_schema = response_format.get("json_schema")
+            if isinstance(json_schema, dict):
+                kwargs["format"] = json_schema.get("schema", json_schema)
+                return
+
+    # Fall back to passing through schema-like payloads for native Ollama support.
+    kwargs["format"] = response_format
+
+
 @retry(
     stop=stop_after_attempt(5),  # Increase from 3 to 5 attempts
     wait=wait_exponential(multiplier=1, min=4, max=60),  # Extend max wait to 60 seconds
@@ -67,12 +96,46 @@ async def _ollama_model_if_cache(
     enable_cot: bool = False,
     **kwargs,
 ) -> Union[str, AsyncIterator[str]]:
+    """Call Ollama chat API with OpenAI-style structured-output compatibility.
+
+    Structured output note:
+    - This adapter accepts OpenAI-style ``response_format`` and translates it
+      to Ollama's native ``format`` field.
+    - ``response_format={"type": "json_object"}`` maps to ``format="json"``.
+    - Deprecated ``keyword_extraction`` and ``entity_extraction`` booleans are
+      compatibility shims; when no explicit ``response_format`` is supplied,
+      they are mapped to ``{"type": "json_object"}``.
+    """
     if enable_cot:
         logger.debug("enable_cot=True is not supported for ollama and will be ignored.")
     stream = True if kwargs.get("stream") else False
 
     kwargs.pop("max_tokens", None)
-    # kwargs.pop("response_format", None) # allow json
+    # Deprecation shims: map legacy boolean flags to response_format only when
+    # an explicit response_format was not supplied by the caller.
+    if kwargs.get("response_format") is None:
+        if kwargs.pop("entity_extraction", False):
+            warnings.warn(
+                "_ollama_model_if_cache(entity_extraction=True) is deprecated; "
+                "pass response_format={'type': 'json_object'} instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            kwargs["response_format"] = {"type": "json_object"}
+        elif kwargs.pop("keyword_extraction", False):
+            warnings.warn(
+                "_ollama_model_if_cache(keyword_extraction=True) is deprecated; "
+                "pass response_format={'type': 'json_object'} instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            kwargs["response_format"] = {"type": "json_object"}
+    else:
+        # response_format was supplied explicitly; drop legacy flags silently.
+        kwargs.pop("entity_extraction", None)
+        kwargs.pop("keyword_extraction", None)
+
+    _normalize_ollama_response_format(kwargs)
     host = kwargs.pop("host", None)
     timeout = kwargs.pop("timeout", None)
     if timeout == 0:
@@ -157,11 +220,15 @@ async def ollama_model_complete(
     history_messages=[],
     enable_cot: bool = False,
     keyword_extraction=False,
+    entity_extraction=False,
     **kwargs,
 ) -> Union[str, AsyncIterator[str]]:
-    keyword_extraction = kwargs.pop("keyword_extraction", None)
+    # Forward legacy extraction flags as kwargs so _ollama_model_if_cache can
+    # emit a single DeprecationWarning with the correct stack frame.
     if keyword_extraction:
-        kwargs["format"] = "json"
+        kwargs.setdefault("keyword_extraction", True)
+    if entity_extraction:
+        kwargs.setdefault("entity_extraction", True)
     model_name = kwargs.pop("model_name", None) or kwargs["hashing_kv"].global_config["llm_model_name"]
     return await _ollama_model_if_cache(
         model_name,

@@ -15,6 +15,10 @@ DEFAULT_SUMMARY_LANGUAGE = "English"  # Default language for document processing
 DEFAULT_MAX_GLEANING = 1
 DEFAULT_ENTITY_NAME_MAX_LENGTH = 256
 
+# Per-response output limits for entity extraction prompts
+DEFAULT_MAX_EXTRACTION_RECORDS = 100
+DEFAULT_MAX_EXTRACTION_ENTITIES = 40
+
 # Number of description fragments to trigger LLM summary
 DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE = 8
 # Max description token size to trigger LLM summary
@@ -42,6 +46,7 @@ DEFAULT_ENTITY_TYPES = [
 
 # Default relationship types to prioritize during extraction (empty = no preference)
 DEFAULT_RELATIONSHIP_TYPES: list[str] = []
+
 
 # Separator for: description, source_id and relation-key fields(Can not be changed after data inserted)
 GRAPH_FIELD_SEP = "<SEP>"
@@ -92,6 +97,15 @@ DEFAULT_TEMPERATURE = 1.0
 DEFAULT_MAX_ASYNC = 4  # Default maximum async operations
 DEFAULT_MAX_PARALLEL_INSERT = 2  # Default maximum parallel insert operations
 
+# RAG-Anything / LightRAG Document pipeline (LR2-PRD)
+FULL_DOCS_FORMAT_RAW = "raw"  # content in full_docs["content"]
+FULL_DOCS_FORMAT_LIGHTRAG = "lightrag"  # content in LightRAG Document files
+FULL_DOCS_FORMAT_PENDING_PARSE = (
+    "pending_parse"  # file saved but not yet parsed; parse_native will read from disk
+)
+PARSED_DIR_NAME = "__parsed__"  # Dir for parsed files (renamed from __enqueued__)
+DEFAULT_MAX_PARALLEL_ANALYZE = 2  # Multimodal analysis (VLM) concurrency
+
 # Embedding configuration defaults
 DEFAULT_EMBEDDING_FUNC_MAX_ASYNC = 8  # Default max async for embedding functions
 DEFAULT_EMBEDDING_BATCH_NUM = 10  # Default batch size for embedding computations
@@ -102,6 +116,12 @@ DEFAULT_TIMEOUT = 300
 # Default llm and embedding timeout
 DEFAULT_LLM_TIMEOUT = 180
 DEFAULT_EMBEDDING_TIMEOUT = 30
+
+# Rerank async / timeout defaults
+# Concurrency falls back to base MAX_ASYNC when env unset; timeout has its own
+# default since reranker calls are typically much faster than full LLM generation.
+DEFAULT_RERANK_MAX_ASYNC = DEFAULT_MAX_ASYNC
+DEFAULT_RERANK_TIMEOUT = 30
 
 # Logging configuration defaults
 DEFAULT_LOG_MAX_BYTES = 10485760  # Default 10MB

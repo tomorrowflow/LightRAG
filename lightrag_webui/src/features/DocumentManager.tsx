@@ -18,7 +18,6 @@ import UploadDocumentsDialog from '@/components/documents/UploadDocumentsDialog'
 import ClearDocumentsDialog from '@/components/documents/ClearDocumentsDialog'
 import DeleteDocumentsDialog from '@/components/documents/DeleteDocumentsDialog'
 import PaginationControls from '@/components/ui/PaginationControls'
-import { SchemeProvider } from '@/contexts/SchemeContext';
 import SchemeManager from '@/components/documents/SchemeManager/SchemeManager'
 import {
   Dialog,
@@ -28,7 +27,6 @@ import {
   DialogTitle,
   DialogTrigger
 } from '@/components/ui/Dialog'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/Tooltip'
 
 import {
   scanNewDocuments,
@@ -46,10 +44,21 @@ import { copyToClipboard } from '@/utils/clipboard'
 
 import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, CopyIcon } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
+import {
+  getStatusBucket,
+  matchesStatusFilter,
+  type StatusBucket,
+  type StatusFilter
+} from '@/features/documentStatusFilters'
 
-import { useScheme } from '@/contexts/SchemeContext';
+import { useScheme } from '@/contexts/SchemeContext'
 
-type StatusFilter = DocStatus | 'all';
+type StatusDisplayConfig = {
+  labelKey: string
+  className: string
+}
+
+const STATUS_BUCKETS: StatusBucket[] = ['processed', 'analyzing', 'processing', 'pending', 'failed']
 
 // Utility functions defined outside component for better performance and to avoid dependency issues
 const getCountValue = (counts: Record<string, number>, ...keys: string[]): number => {
@@ -62,10 +71,28 @@ const getCountValue = (counts: Record<string, number>, ...keys: string[]): numbe
   return 0
 }
 
+const getAggregateCount = (counts: Record<string, number>, ...keys: string[]): number =>
+  keys.reduce((total, key) => total + getCountValue(counts, key), 0)
+
 const hasActiveDocumentsStatus = (counts: Record<string, number>): boolean =>
-  getCountValue(counts, 'PROCESSING', 'processing') > 0 ||
+  getAggregateCount(counts, 'PROCESSING', 'processing', 'PARSING', 'parsing', 'ANALYZING', 'analyzing') > 0 ||
   getCountValue(counts, 'PENDING', 'pending') > 0 ||
-  getCountValue(counts, 'PREPROCESSED', 'preprocessed') > 0
+  getCountValue(counts, 'PREPROCESSED', 'preprocessed') > 0 ||
+  getCountValue(counts, 'READY', 'ready') > 0 ||
+  getCountValue(counts, 'HANDLING', 'handling') > 0
+
+const buildLegacyDocs = (documents: DocStatusResponse[]): DocsStatusesResponse => {
+  const statuses = STATUS_BUCKETS.reduce<Record<StatusBucket, DocStatusResponse[]>>((acc, status) => {
+    acc[status] = []
+    return acc
+  }, {} as Record<StatusBucket, DocStatusResponse[]>)
+
+  documents.forEach((doc) => {
+    statuses[getStatusBucket(doc.status)].push(doc)
+  })
+
+  return { statuses }
+}
 
 const getDisplayFileName = (doc: DocStatusResponse, maxLength: number = 20): string => {
   // Check if file_path exists and is a non-empty string
@@ -214,6 +241,58 @@ const DocumentStatusDetailsDialog = ({ doc }: { doc: DocStatusResponse }) => {
 }
 
 const pulseStyle = `
+/* Tooltip styles */
+.tooltip-container {
+  position: relative;
+  overflow: visible !important;
+}
+
+.tooltip {
+  position: fixed; /* Use fixed positioning to escape overflow constraints */
+  z-index: 9999; /* Ensure tooltip appears above all other elements */
+  max-width: 600px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem; /* 12px */
+  background-color: rgba(0, 0, 0, 0.95);
+  color: white;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  pointer-events: none; /* Prevent tooltip from interfering with mouse events */
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s, visibility 0.15s;
+}
+
+.tooltip.visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+.dark .tooltip {
+  background-color: rgba(255, 255, 255, 0.95);
+  color: black;
+}
+
+.tooltip pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Position tooltip helper class */
+.tooltip-helper {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 0;
+}
+
 @keyframes pulse {
   0% {
     background-color: rgb(255 0 0 / 0.1);
@@ -338,7 +417,7 @@ export default function DocumentManager() {
   const [pageByStatus, setPageByStatus] = useState<Record<StatusFilter, number>>({
     all: 1,
     processed: 1,
-    preprocessed: 1,
+    analyzing: 1,
     processing: 1,
     pending: 1,
     failed: 1,
@@ -410,7 +489,7 @@ export default function DocumentManager() {
     setPageByStatus({
       all: 1,
       processed: 1,
-      preprocessed: 1,
+      analyzing: 1,
       processing: 1,
       pending: 1,
       failed: 1,
@@ -452,6 +531,57 @@ export default function DocumentManager() {
   // Define a new type that includes status information
   type DocStatusWithStatus = DocStatusResponse & { status: DocStatus };
 
+  const getStatusDisplay = useCallback((status: DocStatus): StatusDisplayConfig => {
+    switch (status) {
+      case 'processed':
+        return {
+          labelKey: 'documentPanel.documentManager.status.completed',
+          className: 'text-green-600'
+        }
+      case 'preprocessed':
+        return {
+          labelKey: 'documentPanel.documentManager.status.preprocessed',
+          className: 'text-purple-600'
+        }
+      case 'parsing':
+        return {
+          labelKey: 'documentPanel.documentManager.status.parsing',
+          className: 'text-cyan-600'
+        }
+      case 'analyzing':
+        return {
+          labelKey: 'documentPanel.documentManager.status.analyzing',
+          className: 'text-indigo-600'
+        }
+      case 'processing':
+        return {
+          labelKey: 'documentPanel.documentManager.status.processing',
+          className: 'text-blue-600'
+        }
+      case 'pending':
+        return {
+          labelKey: 'documentPanel.documentManager.status.pending',
+          className: 'text-yellow-600'
+        }
+      case 'ready':
+        return {
+          labelKey: 'documentPanel.documentManager.status.ready',
+          className: 'text-teal-600'
+        }
+      case 'handling':
+        return {
+          labelKey: 'documentPanel.documentManager.status.handling',
+          className: 'text-orange-600'
+        }
+      case 'failed':
+      default:
+        return {
+          labelKey: 'documentPanel.documentManager.status.failed',
+          className: 'text-red-600'
+        }
+    }
+  }, [])
+
   const filteredAndSortedDocs = useMemo(() => {
     // Use currentPageDocs directly if available (from paginated API)
     // This preserves the backend's sort order and prevents status grouping
@@ -468,26 +598,20 @@ export default function DocumentManager() {
     // Create a flat array of documents with status information
     const allDocuments: DocStatusWithStatus[] = [];
 
-    if (statusFilter === 'all') {
-      // When filter is 'all', include documents from all statuses
-      Object.entries(docs.statuses).forEach(([status, documents]) => {
-        documents.forEach(doc => {
+    Object.entries(docs.statuses).forEach(([status, documents]) => {
+      const fallbackStatus = status as DocStatus
+
+      for (const doc of documents ?? []) {
+        const documentStatus = doc.status ?? fallbackStatus
+
+        if (matchesStatusFilter(documentStatus, statusFilter)) {
           allDocuments.push({
             ...doc,
-            status: status as DocStatus
-          });
-        });
-      });
-    } else {
-      // When filter is specific status, only include documents from that status
-      const documents = docs.statuses[statusFilter] || [];
-      documents.forEach(doc => {
-        allDocuments.push({
-          ...doc,
-          status: statusFilter
-        });
-      });
-    }
+            status: documentStatus
+          })
+        }
+      }
+    })
 
     // Sort all documents together if sort field and direction are specified
     if (sortField && sortDirection) {
@@ -550,7 +674,7 @@ export default function DocumentManager() {
     const counts: Record<string, number> = { all: 0 };
 
     Object.entries(docs.statuses).forEach(([status, documents]) => {
-      counts[status as DocStatus] = documents.length;
+      counts[status] = documents.length;
       counts.all += documents.length;
     });
 
@@ -558,18 +682,21 @@ export default function DocumentManager() {
   }, [docs]);
 
   const processedCount = getCountValue(statusCounts, 'PROCESSED', 'processed') || documentCounts.processed || 0;
-  const preprocessedCount =
-    getCountValue(statusCounts, 'PREPROCESSED', 'preprocessed') ||
-    documentCounts.preprocessed ||
+  const analyzingCount =
+    getAggregateCount(statusCounts, 'PARSING', 'parsing', 'ANALYZING', 'analyzing', 'PREPROCESSED', 'preprocessed') ||
+    documentCounts.analyzing ||
     0;
-  const processingCount = getCountValue(statusCounts, 'PROCESSING', 'processing') || documentCounts.processing || 0;
+  const processingCount =
+    getAggregateCount(statusCounts, 'PROCESSING', 'processing') ||
+    documentCounts.processing ||
+    0;
   const pendingCount = getCountValue(statusCounts, 'PENDING', 'pending') || documentCounts.pending || 0;
   const failedCount = getCountValue(statusCounts, 'FAILED', 'failed') || documentCounts.failed || 0;
 
   // Store previous status counts
   const prevStatusCounts = useRef({
     processed: 0,
-    preprocessed: 0,
+    analyzing: 0,
     processing: 0,
     handling: 0,
     pending: 0,
@@ -589,6 +716,68 @@ export default function DocumentManager() {
 
   // Reference to the card content element
   const cardContentRef = useRef<HTMLDivElement>(null);
+
+  // Add tooltip position adjustment for fixed positioning
+  useEffect(() => {
+    if (!docs) return;
+
+    // Function to position tooltips
+    const positionTooltips = () => {
+      // Get all tooltip containers
+      const containers = document.querySelectorAll<HTMLElement>('.tooltip-container');
+
+      containers.forEach(container => {
+        const tooltip = container.querySelector<HTMLElement>('.tooltip');
+        if (!tooltip) return;
+
+        // Skip tooltips that aren't visible
+        if (!tooltip.classList.contains('visible')) return;
+
+        // Get container position
+        const rect = container.getBoundingClientRect();
+
+        // Position tooltip above the container
+        tooltip.style.left = `${rect.left}px`;
+        tooltip.style.top = `${rect.top - 5}px`;
+        tooltip.style.transform = 'translateY(-100%)';
+      });
+    };
+
+    // Set up event listeners
+    const handleMouseOver = (e: MouseEvent) => {
+      // Check if target or its parent is a tooltip container
+      const target = e.target as HTMLElement;
+      const container = target.closest('.tooltip-container');
+      if (!container) return;
+
+      // Find tooltip and make it visible
+      const tooltip = container.querySelector<HTMLElement>('.tooltip');
+      if (tooltip) {
+        tooltip.classList.add('visible');
+        // Position immediately without delay
+        positionTooltips();
+      }
+    };
+
+    const handleMouseOut = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const container = target.closest('.tooltip-container');
+      if (!container) return;
+
+      const tooltip = container.querySelector<HTMLElement>('.tooltip');
+      if (tooltip) {
+        tooltip.classList.remove('visible');
+      }
+    };
+
+    document.addEventListener('mouseover', handleMouseOver);
+    document.addEventListener('mouseout', handleMouseOut);
+
+    return () => {
+      document.removeEventListener('mouseover', handleMouseOver);
+      document.removeEventListener('mouseout', handleMouseOut);
+    };
+  }, [docs]);
 
   const buildQuerySnapshot = useCallback((
     overrides: Partial<QuerySnapshot> = {}
@@ -617,20 +806,7 @@ export default function DocumentManager() {
     setCurrentPageDocs(response.documents);
     setStatusCounts(response.status_counts);
 
-    // Update legacy docs state for backward compatibility
-    const legacyDocs: DocsStatusesResponse = {
-      statuses: {
-        processed: response.documents.filter((doc: DocStatusResponse) => doc.status === 'processed'),
-        preprocessed: response.documents.filter((doc: DocStatusResponse) => doc.status === 'preprocessed'),
-        processing: response.documents.filter((doc: DocStatusResponse) => doc.status === 'processing'),
-        pending: response.documents.filter((doc: DocStatusResponse) => doc.status === 'pending'),
-        ready: response.documents.filter((doc: DocStatusResponse) => doc.status === 'ready'),
-        handling: response.documents.filter((doc: DocStatusResponse) => doc.status === 'handling'),
-        failed: response.documents.filter((doc: DocStatusResponse) => doc.status === 'failed')
-      }
-    };
-
-    setDocs(response.pagination.total_count > 0 ? legacyDocs : null);
+    setDocs(response.pagination.total_count > 0 ? buildLegacyDocs(response.documents) : null);
   }, []);
 
 
@@ -724,7 +900,7 @@ export default function DocumentManager() {
     setPageByStatus({
       all: 1,
       processed: 1,
-      preprocessed: 1,
+      analyzing: 1,
       processing: 1,
       pending: 1,
       failed: 1,
@@ -1077,7 +1253,7 @@ export default function DocumentManager() {
     // Get new status counts
     const newStatusCounts = {
       processed: docs?.statuses?.processed?.length || 0,
-      preprocessed: docs?.statuses?.preprocessed?.length || 0,
+      analyzing: docs?.statuses?.analyzing?.length || 0,
       processing: docs?.statuses?.processing?.length || 0,
       handling: docs?.statuses?.handling?.length || 0,
       pending: docs?.statuses?.pending?.length || 0,
@@ -1143,6 +1319,9 @@ export default function DocumentManager() {
     setStatusCounts({
       all: 0,
       processed: 0,
+      preprocessed: 0,
+      parsing: 0,
+      analyzing: 0,
       processing: 0,
       pending: 0,
       failed: 0
@@ -1312,7 +1491,7 @@ export default function DocumentManager() {
                       statusFilter === 'all' && 'bg-gray-100 dark:bg-gray-900 font-medium border border-gray-400 dark:border-gray-500 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.all')} ({statusCounts.all || documentCounts.all})
+                    {t('documentPanel.documentManager.filters.all')} ({statusCounts.all || documentCounts.all})
                   </Button>
                   <Button
                     size="sm"
@@ -1324,19 +1503,19 @@ export default function DocumentManager() {
                       statusFilter === 'processed' && 'bg-green-100 dark:bg-green-900/30 font-medium border border-green-400 dark:border-green-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.completed')} ({processedCount})
+                    {t('documentPanel.documentManager.filters.completed')} ({processedCount})
                   </Button>
                   <Button
                     size="sm"
-                    variant={statusFilter === 'preprocessed' ? 'secondary' : 'outline'}
-                    onClick={() => handleStatusFilterChange('preprocessed')}
+                    variant={statusFilter === 'analyzing' ? 'secondary' : 'outline'}
+                    onClick={() => handleStatusFilterChange('analyzing')}
                     disabled={isRefreshing}
                     className={cn(
-                      preprocessedCount > 0 ? 'text-purple-600' : 'text-gray-500',
-                      statusFilter === 'preprocessed' && 'bg-purple-100 dark:bg-purple-900/30 font-medium border border-purple-400 dark:border-purple-600 shadow-sm'
+                      analyzingCount > 0 ? 'text-indigo-600' : 'text-gray-500',
+                      statusFilter === 'analyzing' && 'bg-indigo-100 dark:bg-indigo-900/30 font-medium border border-indigo-400 dark:border-indigo-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.preprocessed')} ({preprocessedCount})
+                    {t('documentPanel.documentManager.filters.analyzing')} ({analyzingCount})
                   </Button>
                   <Button
                     size="sm"
@@ -1348,15 +1527,16 @@ export default function DocumentManager() {
                       statusFilter === 'processing' && 'bg-blue-100 dark:bg-blue-900/30 font-medium border border-blue-400 dark:border-blue-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.processing')} ({processingCount})
+                    {t('documentPanel.documentManager.filters.processing')} ({processingCount})
                   </Button>
                   <Button
                     size="sm"
                     variant={statusFilter === 'handling' ? 'secondary' : 'outline'}
-                    onClick={() => setStatusFilter('handling')}
+                    onClick={() => handleStatusFilterChange('handling')}
+                    disabled={isRefreshing}
                     className={cn(
-                      documentCounts.handling > 0 ? 'text-purple-600' : 'text-gray-500',
-                      statusFilter === 'handling' && 'bg-purple-100 dark:bg-purple-900/30 font-medium border border-purple-400 dark:border-purple-600 shadow-sm'
+                      (statusCounts.HANDLING || statusCounts.handling || 0) > 0 ? 'text-orange-600' : 'text-gray-500',
+                      statusFilter === 'handling' && 'bg-orange-100 dark:bg-orange-900/30 font-medium border border-orange-400 dark:border-orange-600 shadow-sm'
                     )}
                   >
                     {t('documentPanel.documentManager.status.handling')} ({statusCounts.HANDLING || statusCounts.handling || 0})
@@ -1371,15 +1551,16 @@ export default function DocumentManager() {
                       statusFilter === 'pending' && 'bg-yellow-100 dark:bg-yellow-900/30 font-medium border border-yellow-400 dark:border-yellow-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.pending')} ({pendingCount})
+                    {t('documentPanel.documentManager.filters.pending')} ({pendingCount})
                   </Button>
                   <Button
                     size="sm"
                     variant={statusFilter === 'ready' ? 'secondary' : 'outline'}
-                    onClick={() => setStatusFilter('ready')}
+                    onClick={() => handleStatusFilterChange('ready')}
+                    disabled={isRefreshing}
                     className={cn(
-                      documentCounts.ready > 0 ? 'text-gray-600' : 'text-gray-500',
-                      statusFilter === 'ready' && 'bg-gray-100 dark:bg-gray-900/30 font-medium border border-gray-400 dark:border-gray-600 shadow-sm'
+                      (statusCounts.READY || statusCounts.ready || 0) > 0 ? 'text-teal-600' : 'text-gray-500',
+                      statusFilter === 'ready' && 'bg-teal-100 dark:bg-teal-900/30 font-medium border border-teal-400 dark:border-teal-600 shadow-sm'
                     )}
                   >
                     {t('documentPanel.documentManager.status.ready')} ({statusCounts.READY || statusCounts.ready || 0})
@@ -1394,7 +1575,7 @@ export default function DocumentManager() {
                       statusFilter === 'failed' && 'bg-red-100 dark:bg-red-900/30 font-medium border border-red-400 dark:border-red-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.failed')} ({failedCount})
+                    {t('documentPanel.documentManager.filters.failed')} ({failedCount})
                   </Button>
                 </div>
                 <Button
@@ -1444,156 +1625,157 @@ export default function DocumentManager() {
             {docs && (
               <div className="absolute inset-0 flex flex-col p-0">
                 <div className="absolute inset-[-1px] flex flex-col p-0 border rounded-md border-gray-200 dark:border-gray-700 overflow-hidden">
-                  <TooltipProvider>
-                    <Table className="w-full">
-                      <TableHeader className="sticky top-0 bg-background z-10 shadow-sm">
-                        <TableRow className="border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/75 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">
-                          <TableHead
-                            onClick={() => handleSort('id')}
-                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
-                          >
-                            <div className="flex items-center">
-                              {showFileName
-                                ? t('documentPanel.documentManager.columns.fileName')
-                                : t('documentPanel.documentManager.columns.id')
-                              }
-                              {((sortField === 'id' && !showFileName) || (sortField === 'file_path' && showFileName)) && (
-                                <span className="ml-1">
-                                  {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
-                                </span>
-                              )}
-                            </div>
-                          </TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.summary')}</TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.handler')}</TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.status')}</TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.length')}</TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.chunks')}</TableHead>
-                          <TableHead
-                            onClick={() => handleSort('created_at')}
-                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
-                          >
-                            <div className="flex items-center">
-                              {t('documentPanel.documentManager.columns.created')}
-                              {sortField === 'created_at' && (
-                                <span className="ml-1">
-                                  {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
-                                </span>
-                              )}
-                            </div>
-                          </TableHead>
-                          <TableHead
-                            onClick={() => handleSort('updated_at')}
-                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
-                          >
-                            <div className="flex items-center">
-                              {t('documentPanel.documentManager.columns.updated')}
-                              {sortField === 'updated_at' && (
-                                <span className="ml-1">
-                                  {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
-                                </span>
-                              )}
-                            </div>
-                          </TableHead>
-                          <TableHead className="w-16 text-center">
-                            {t('documentPanel.documentManager.columns.select')}
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody className="text-sm overflow-auto">
-                        {filteredAndSortedDocs && filteredAndSortedDocs.map((doc) => (
-                          <TableRow key={doc.id}>
-                            <TableCell className="truncate font-mono overflow-visible max-w-[250px]">
-                              {showFileName ? (
-                                <>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <div className="truncate">
-                                        {getDisplayFileName(doc, 30)}
-                                      </div>
-                                    </TooltipTrigger>
-                                    <TooltipContent side="top" className="max-w-2xl">
-                                      {doc.file_path}
-                                    </TooltipContent>
-                                  </Tooltip>
-                                  <div className="text-xs text-gray-500">{doc.id}</div>
-                                </>
-                              ) : (
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <div className="truncate">
-                                      {doc.id}
-                                    </div>
-                                  </TooltipTrigger>
-                                  <TooltipContent side="top" className="max-w-2xl">
-                                    {doc.file_path}
-                                  </TooltipContent>
-                                </Tooltip>
-                              )}
-                            </TableCell>
-                            <TableCell className="max-w-xs min-w-45 truncate overflow-visible">
-                              <Tooltip>
-                                <TooltipTrigger asChild>
+                  <Table className="w-full">
+                    <TableHeader className="sticky top-0 bg-background z-10 shadow-sm">
+                      <TableRow className="border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/75 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">
+                        <TableHead
+                          onClick={() => handleSort('id')}
+                          className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
+                        >
+                          <div className="flex items-center">
+                            {showFileName
+                              ? t('documentPanel.documentManager.columns.fileName')
+                              : t('documentPanel.documentManager.columns.id')
+                            }
+                            {((sortField === 'id' && !showFileName) || (sortField === 'file_path' && showFileName)) && (
+                              <span className="ml-1">
+                                {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
+                              </span>
+                            )}
+                          </div>
+                        </TableHead>
+                        <TableHead>{t('documentPanel.documentManager.columns.summary')}</TableHead>
+                        <TableHead>{t('documentPanel.documentManager.columns.handler')}</TableHead>
+                        <TableHead>{t('documentPanel.documentManager.columns.status')}</TableHead>
+                        <TableHead>{t('documentPanel.documentManager.columns.length')}</TableHead>
+                        <TableHead>{t('documentPanel.documentManager.columns.chunks')}</TableHead>
+                        <TableHead
+                          onClick={() => handleSort('created_at')}
+                          className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
+                        >
+                          <div className="flex items-center">
+                            {t('documentPanel.documentManager.columns.created')}
+                            {sortField === 'created_at' && (
+                              <span className="ml-1">
+                                {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
+                              </span>
+                            )}
+                          </div>
+                        </TableHead>
+                        <TableHead
+                          onClick={() => handleSort('updated_at')}
+                          className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
+                        >
+                          <div className="flex items-center">
+                            {t('documentPanel.documentManager.columns.updated')}
+                            {sortField === 'updated_at' && (
+                              <span className="ml-1">
+                                {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
+                              </span>
+                            )}
+                          </div>
+                        </TableHead>
+                        <TableHead className="w-16 text-center">
+                          {t('documentPanel.documentManager.columns.select')}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody className="text-sm overflow-auto">
+                      {filteredAndSortedDocs && filteredAndSortedDocs.map((doc) => (
+                        <TableRow key={doc.id}>
+                          <TableCell className="truncate font-mono overflow-visible max-w-[250px]">
+                            {showFileName ? (
+                              <>
+                                <div className="group relative overflow-visible tooltip-container">
                                   <div className="truncate">
-                                    {doc.content_summary}
+                                    {getDisplayFileName(doc, 30)}
                                   </div>
-                                </TooltipTrigger>
-                                <TooltipContent side="top" className="max-w-2xl">
-                                  {doc.content_summary}
-                                </TooltipContent>
-                              </Tooltip>
-                            </TableCell>
-                            <TableCell className="truncate max-w-[150px]">
-                              {doc.scheme_name || '-'}
-                            </TableCell>
-                            <TableCell>
-                              <div className="flex items-center">
-                                {doc.status === 'processed' && (
-                                  <span className="text-green-600">{t('documentPanel.documentManager.status.completed')}</span>
-                                )}
-                                {doc.status === 'preprocessed' && (
-                                  <span className="text-purple-600">{t('documentPanel.documentManager.status.preprocessed')}</span>
-                                )}
-                                {doc.status === 'processing' && (
-                                  <span className="text-blue-600">{t('documentPanel.documentManager.status.processing')}</span>
-                                )}
-                                {doc.status === 'pending' && (
-                                  <span className="text-yellow-600">{t('documentPanel.documentManager.status.pending')}</span>
-                                )}
-                                {doc.status === 'failed' && (
-                                  <span className="text-red-600">{t('documentPanel.documentManager.status.failed')}</span>
-                                )}
-                                {doc.status === 'ready' && (
-                                  <span className="text-purple-600">{t('documentPanel.documentManager.status.ready')}</span>
-                                )}
-                                {doc.status === 'handling' && (
-                                  <span className="text-gray-600">{t('documentPanel.documentManager.status.handling')}</span>
-                                )}
-
-                                {hasDocumentDetails(doc) && <DocumentStatusDetailsDialog doc={doc} />}
+                                  <div className="invisible group-hover:visible tooltip">
+                                    {doc.file_path}
+                                  </div>
+                                </div>
+                                <div className="text-xs text-gray-500">{doc.id}</div>
+                              </>
+                            ) : (
+                              <div className="group relative overflow-visible tooltip-container">
+                                <div className="truncate">
+                                  {doc.id}
+                                </div>
+                                <div className="invisible group-hover:visible tooltip">
+                                  {doc.file_path}
+                                </div>
                               </div>
-                            </TableCell>
-                            <TableCell>{doc.content_length ?? '-'}</TableCell>
-                            <TableCell>{doc.chunks_count ?? '-'}</TableCell>
-                            <TableCell className="truncate">
-                              {new Date(doc.created_at).toLocaleString()}
-                            </TableCell>
-                            <TableCell className="truncate">
-                              {new Date(doc.updated_at).toLocaleString()}
-                            </TableCell>
-                            <TableCell className="text-center">
-                              <Checkbox
-                                checked={selectedDocIds.includes(doc.id)}
-                                onCheckedChange={(checked) => handleDocumentSelect(doc.id, checked === true)}
-                                // disabled={doc.status !== 'processed'}
-                                className="mx-auto"
-                              />
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TooltipProvider>
+                            )}
+                          </TableCell>
+                          <TableCell className="max-w-xs min-w-45 truncate overflow-visible">
+                            <div className="group relative overflow-visible tooltip-container">
+                              <div className="truncate">
+                                {doc.content_summary}
+                              </div>
+                              <div className="invisible group-hover:visible tooltip">
+                                {doc.content_summary}
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell className="truncate max-w-[150px]">
+                            {doc.scheme_name || '-'}
+                          </TableCell>
+                          <TableCell>
+                            <div className="group relative flex items-center overflow-visible tooltip-container">
+                              {(() => {
+                                const statusDisplay = getStatusDisplay(doc.status)
+                                return (
+                                  <span className={statusDisplay.className}>
+                                    {t(statusDisplay.labelKey)}
+                                  </span>
+                                )
+                              })()}
+
+                              {/* Icon rendering logic */}
+                              {doc.error_msg ? (
+                                <AlertTriangle className="ml-2 h-4 w-4 text-yellow-500" />
+                              ) : (doc.metadata && Object.keys(doc.metadata).length > 0) && (
+                                <Info className="ml-2 h-4 w-4 text-blue-500" />
+                              )}
+
+                              {/* Tooltip rendering logic */}
+                              {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0) || doc.track_id) && (
+                                <div className="invisible group-hover:visible tooltip">
+                                  {doc.track_id && (
+                                    <div className="mt-1">Track ID: {doc.track_id}</div>
+                                  )}
+                                  {doc.metadata && Object.keys(doc.metadata).length > 0 && (
+                                    <pre>{formatMetadata(doc.metadata)}</pre>
+                                  )}
+                                  {doc.error_msg && (
+                                    <pre>{doc.error_msg}</pre>
+                                  )}
+                                </div>
+                              )}
+
+                              {hasDocumentDetails(doc) && <DocumentStatusDetailsDialog doc={doc} />}
+                            </div>
+                          </TableCell>
+                          <TableCell>{doc.content_length ?? '-'}</TableCell>
+                          <TableCell>{doc.chunks_count ?? '-'}</TableCell>
+                          <TableCell className="truncate">
+                            {new Date(doc.created_at).toLocaleString()}
+                          </TableCell>
+                          <TableCell className="truncate">
+                            {new Date(doc.updated_at).toLocaleString()}
+                          </TableCell>
+                          <TableCell className="text-center">
+                            <Checkbox
+                              checked={selectedDocIds.includes(doc.id)}
+                              onCheckedChange={(checked) => handleDocumentSelect(doc.id, checked === true)}
+                              // disabled={doc.status !== 'processed'}
+                              className="mx-auto"
+                            />
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
                 </div>
               </div>
             )}
