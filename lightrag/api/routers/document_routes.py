@@ -2912,8 +2912,8 @@ def create_document_routes(
                         "multimodal_content": [],
                         "scheme_name": current_framework,
                         "content_length": 0,
-                        "created_at": "",
-                        "updated_at": "",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
                         "file_path": safe_filename,
                     }
                 }
