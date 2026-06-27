@@ -25,7 +25,6 @@ from lightrag.constants import (
     DEFAULT_TIMEOUT,
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
-    DEFAULT_HISTORY_TURNS,
     DEFAULT_MAX_ENTITY_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
@@ -34,6 +33,7 @@ from lightrag.constants import (
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE,
     DEFAULT_MAX_ASYNC,
+    DEFAULT_MAX_PARALLEL_INSERT,
     DEFAULT_SUMMARY_MAX_TOKENS,
     DEFAULT_SUMMARY_LENGTH_RECOMMENDED,
     DEFAULT_SUMMARY_CONTEXT_SIZE,
@@ -287,7 +287,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-async",
         type=int,
-        default=get_env_value("MAX_ASYNC", DEFAULT_MAX_ASYNC, int),
+        default=get_env_value(
+            "MAX_ASYNC_LLM", get_env_value("MAX_ASYNC", DEFAULT_MAX_ASYNC, int), int
+        ),
         help=f"Maximum async operations (default: from env or {DEFAULT_MAX_ASYNC})",
     )
     parser.add_argument(
@@ -431,14 +433,6 @@ def parse_args() -> argparse.Namespace:
         help=f"Rerank binding type (default: from env or {DEFAULT_RERANK_BINDING})",
     )
 
-    # Document loading engine configuration
-    parser.add_argument(
-        "--docling",
-        action="store_true",
-        default=False,
-        help="Enable DOCLING document loading engine (default: from env or DEFAULT)",
-    )
-
     # Conditionally add binding-specific options (Ollama, OpenAI, Azure OpenAI, Gemini)
     # This registers command line arguments (e.g., --openai-llm-temperature)
     # and reads corresponding environment variables (e.g., OPENAI_LLM_TEMPERATURE)
@@ -508,7 +502,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Get MAX_PARALLEL_INSERT from environment
-    args.max_parallel_insert = get_env_value("MAX_PARALLEL_INSERT", 2, int)
+    args.max_parallel_insert = get_env_value(
+        "MAX_PARALLEL_INSERT", DEFAULT_MAX_PARALLEL_INSERT, int
+    )
 
     # Get MAX_GRAPH_NODES from environment
     args.max_graph_nodes = get_env_value("MAX_GRAPH_NODES", 1000, int)
@@ -549,21 +545,40 @@ def parse_args() -> argparse.Namespace:
     args.chunk_overlap_size = get_env_value("CHUNK_OVERLAP_SIZE", 100, int)
 
     # Inject LLM cache configuration
+    # Should not be disabled； LLM cache is required for entity/realtion rebuild after file deletion.
     args.enable_llm_cache_for_extract = get_env_value(
         "ENABLE_LLM_CACHE_FOR_EXTRACT", True, bool
     )
     args.enable_llm_cache = get_env_value("ENABLE_LLM_CACHE", True, bool)
 
-    # Set document_loading_engine from --docling flag
-    if args.docling:
-        args.document_loading_engine = "DOCLING"
-    else:
-        args.document_loading_engine = get_env_value(
-            "DOCUMENT_LOADING_ENGINE", "DEFAULT"
-        )
-
-    # PDF decryption password
-    args.pdf_decrypt_password = get_env_value("PDF_DECRYPT_PASSWORD", None)
+    # --- Backward-compat: RETRIEVAL_LLM_* -> QUERY_/KEYWORD_ roles ---
+    # The fork's RETRIEVAL_LLM_* (a single separate model for all query-time
+    # operations) was superseded by upstream's per-role LLM config. Forward any
+    # RETRIEVAL_LLM_* values onto the QUERY_ and KEYWORD_ role env vars (only
+    # when those are unset) so existing deployments keep working.
+    _retrieval_binding = os.getenv("RETRIEVAL_LLM_BINDING")
+    if _retrieval_binding:
+        _retrieval_values = {
+            "LLM_BINDING": _retrieval_binding,
+            "LLM_MODEL": os.getenv("RETRIEVAL_LLM_MODEL"),
+            "LLM_BINDING_HOST": os.getenv("RETRIEVAL_LLM_BINDING_HOST"),
+            "LLM_BINDING_API_KEY": os.getenv("RETRIEVAL_LLM_BINDING_API_KEY"),
+        }
+        _forwarded = False
+        for _role in ("QUERY", "KEYWORD"):
+            for _suffix, _value in _retrieval_values.items():
+                if _value is None:
+                    continue
+                _key = f"{_role}_{_suffix}"
+                if not os.getenv(_key):
+                    os.environ[_key] = _value
+                    _forwarded = True
+        if _forwarded:
+            logging.warning(
+                "RETRIEVAL_LLM_* environment variables are deprecated; forwarding "
+                "them to QUERY_LLM_* / KEYWORD_LLM_*. Set those role variables "
+                "directly instead."
+            )
 
     # --- Per-role LLM configuration (driven by lightrag.ROLES registry) ---
     for spec in ROLES:
@@ -573,8 +588,8 @@ def parse_args() -> argparse.Namespace:
         model_key = f"{prefix}_LLM_MODEL"
         host_key = f"{prefix}_LLM_BINDING_HOST"
         apikey_key = f"{prefix}_LLM_BINDING_API_KEY"
-        max_async_key = f"MAX_ASYNC_{prefix}_LLM"
-        timeout_key = f"LLM_TIMEOUT_{prefix}_LLM"
+        max_async_key = f"{prefix}_MAX_ASYNC_LLM"
+        timeout_key = f"{prefix}_LLM_TIMEOUT"
 
         role_binding = normalize_binding_name(
             get_env_value(binding_key, None, special_none=True)
@@ -632,6 +647,23 @@ def parse_args() -> argparse.Namespace:
                     f"but required env vars are missing: {', '.join(missing)}"
                 )
 
+    # VLM multimodal master switch — when off, the pipeline emits a warning
+    # and skips every i/t/e item without touching the VLM. When on, the
+    # effective VLM binding must support image inputs.
+    args.vlm_process_enable = get_env_value("VLM_PROCESS_ENABLE", False, bool)
+    if args.vlm_process_enable:
+        effective_vlm_binding = (
+            getattr(args, "vlm_llm_binding", None) or args.llm_binding
+        )
+        vlm_incompatible = {"lollms"}
+        if effective_vlm_binding in vlm_incompatible:
+            raise SystemExit(
+                f"VLM_PROCESS_ENABLE=true but the effective VLM binding "
+                f"'{effective_vlm_binding}' does not support image inputs. "
+                "Configure VLM_LLM_BINDING (or LLM_BINDING) to one of: "
+                "openai, azure_openai, gemini, bedrock, ollama."
+            )
+
     # Add environment variables that were previously read directly
     args.cors_origins = get_env_value("CORS_ORIGINS", "*")
     args.summary_language = get_env_value("SUMMARY_LANGUAGE", DEFAULT_SUMMARY_LANGUAGE)
@@ -666,12 +698,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Rerank async/timeout configuration (independent from base LLM)
-    # rerank_max_async falls back to MAX_ASYNC; rerank_timeout has its own default.
-    args.rerank_max_async = get_env_value("MAX_ASYNC_RERANK_LLM", args.max_async, int)
+    # rerank_max_async falls back to MAX_ASYNC_LLM; rerank_timeout has its own default.
+    args.rerank_max_async = get_env_value("MAX_ASYNC_RERANK", args.max_async, int)
     args.rerank_timeout = get_env_value("RERANK_TIMEOUT", DEFAULT_RERANK_TIMEOUT, int)
 
     # Query configuration
-    args.history_turns = get_env_value("HISTORY_TURNS", DEFAULT_HISTORY_TURNS, int)
     args.top_k = get_env_value("TOP_K", DEFAULT_TOP_K, int)
     args.chunk_top_k = get_env_value("CHUNK_TOP_K", DEFAULT_CHUNK_TOP_K, int)
     args.max_entity_tokens = get_env_value(

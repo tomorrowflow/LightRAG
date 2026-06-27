@@ -99,7 +99,7 @@
         "error": "Некоторые файлы не удалось загрузить"
       },
       "generalError": "Ошибка загрузки\n{{error}}",
-      "fileTypes": "Поддерживаемые типы: TXT, MD, MDX, DOCX, PDF, PPTX, XLSX, RTF, ODT, EPUB, HTML, HTM, TEX, JSON, XML, YAML, YML, CSV, LOG, CONF, INI, PROPERTIES, SQL, BAT, SH, C, CPP, H, HPP, PY, JAVA, JS, TS, SWIFT, GO, RB, PHP, CSS, SCSS, LESS",
+      "fileTypes": "Поддерживаемые типы: TXT, MD, TEXTPACK, MDX, DOCX, PDF, PPTX, XLSX, RTF, ODT, EPUB, HTML, HTM, TEX, JSON, XML, YAML, YML, CSV, LOG, CONF, INI, PROPERTIES, SQL, BAT, SH, C, CPP, H, HPP, PY, JAVA, JS, TS, SWIFT, GO, RB, PHP, CSS, SCSS, LESS",
       "fileUploader": {
         "singleFileLimit": "Нельзя загрузить более 1 файла за раз",
         "maxFilesLimit": "Нельзя загрузить более {{count}} файлов",
@@ -139,9 +139,9 @@
       "filters": {
         "all": "Все",
         "completed": "Завершено",
-        "analyzing": "Анализ",
-        "processing": "Обработка",
-        "pending": "Ожидание",
+        "parse": "Извлечение",
+        "analyze": "Анализ",
+        "process": "Обработка",
         "failed": "Ошибка"
       },
       "status": {
@@ -152,9 +152,7 @@
         "analyzing": "Анализ",
         "processing": "Обработка",
         "pending": "Ожидание",
-        "failed": "Ошибка",
-        "ready": "Готово",
-        "handling": "Обрабатывается"
+        "failed": "Ошибка"
       },
       "errors": {
         "loadFailed": "Не удалось загрузить документы\n{{error}}",
@@ -235,6 +233,9 @@
       "disease": "Болезнь",
       "drug": "Лекарство",
       "food": "Еда",
+      "table": "Таблица",
+      "drawing": "Рисунок",
+      "equation": "Уравнение",
       "other": "Другое"
     },
     "sideBar": {
@@ -296,10 +297,11 @@
     "statusCard": {
       "unavailable": "Информация о статусе недоступна",
       "serverInfo": "Информация о сервере",
-      "workingDirectory": "Рабочая директория",
       "inputDirectory": "Входная директория",
+      "parser": "Парсер",
+      "mineru": "MinerU",
+      "docling": "Docling",
       "otherSettings": "Другие настройки",
-      "summarySettings": "Настройки краткого содержания",
       "llmConfig": "Конфигурация модели",
       "llmBinding": "Привязка LLM",
       "llmBindingHost": "Конечная точка LLM",
@@ -317,11 +319,11 @@
       "rerankerConfig": "Конфигурация ранжирования",
       "rerankerBindingHost": "Конечная точка ранжирования",
       "rerankerModel": "Модель ранжирования",
-      "lockStatus": "Статус блокировки",
-      "threshold": "Порог"
+      "lockStatus": "Статус блокировки"
     },
     "propertiesView": {
       "editProperty": "Редактировать {{property}}",
+      "editLockedByPipeline": "Конвейер занят; редактирование отключено",
       "editPropertyDescription": "Отредактируйте значение свойства в текстовой области ниже.",
       "errors": {
         "duplicateName": "Имя узла уже существует",
@@ -411,6 +413,8 @@
       "startPrompt": "Начните поиск, введя ваш запрос ниже",
       "clear": "Очистить",
       "send": "Отправить",
+      "stop": "Остановить",
+      "userTerminated": "Прервано пользователем — ответ может быть неполным",
       "placeholder": "Введите ваш запрос (Поддержка префикса: /<Режим запроса>)",
       "error": "Ошибка: Не удалось получить ответ",
       "queryModeError": "Поддерживаются только следующие режимы запроса: {{modes}}",
@@ -421,6 +425,7 @@
       "parametersDescription": "Настройте параметры вашего запроса",
       "queryMode": "Режим запроса",
       "queryModeTooltip": "Выберите стратегию поиска:\n• Naive: Традиционный поиск по вектору текстовых фрагментов\n• Local: Фокус на поиске сущностей\n• Global: Фокус на поиске связей\n• Hybrid: Local+Global\n• Mix: Local+Global+Naive\n• Bypass: Пропустить поиск, отправить историю разговора и текущий вопрос в LLM",
+      "queryModeWarning": "Может снизить качество поиска",
       "queryModeOptions": {
         "naive": "Naive",
         "local": "Local",

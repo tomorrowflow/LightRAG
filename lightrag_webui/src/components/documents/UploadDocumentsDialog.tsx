@@ -16,19 +16,26 @@ import { uploadDocument } from '@/api/lightrag'
 
 import { UploadIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { useScheme } from '@/contexts/SchemeContext';
 
 interface UploadDocumentsDialogProps {
   onDocumentsUploaded?: () => Promise<void>
+  /**
+   * Fired once per batch as soon as the first file is accepted by the server.
+   * Lets the parent start its activity probe as early as possible (rather
+   * than waiting for the whole sequential batch to finish).
+   */
+  onUploadBatchAccepted?: () => void
 }
 
-export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDocumentsDialogProps) {
+export default function UploadDocumentsDialog({
+  onDocumentsUploaded,
+  onUploadBatchAccepted
+}: UploadDocumentsDialogProps) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [progresses, setProgresses] = useState<Record<string, number>>({})
   const [fileErrors, setFileErrors] = useState<Record<string, string>>({})
-  const { selectedScheme } = useScheme();
 
   const handleRejectedFiles = useCallback(
     (rejectedFiles: FileRejection[]) => {
@@ -60,11 +67,6 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
 
   const handleDocumentsUpload = useCallback(
     async (filesToUpload: File[]) => {
-      if (!selectedScheme) {
-        toast.error(t('schemeManager.upload.noSchemeSelected'));
-        return;
-      }
-
       setIsUploading(true)
       let hasSuccessfulUpload = false
 
@@ -83,6 +85,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
       try {
         // Track errors locally to ensure we have the final state
         const uploadErrors: Record<string, string> = {}
+        let batchProbeTriggered = false
 
         // Create a collator that supports Chinese sorting
         const collator = new Intl.Collator(['zh-CN', 'en'], {
@@ -102,7 +105,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
               [file.name]: 0
             }))
 
-            const result = await uploadDocument(file, selectedScheme?.id, (percentCompleted: number) => {
+            const result = await uploadDocument(file, (percentCompleted: number) => {
               console.debug(t('documentPanel.uploadDocuments.single.uploading', { name: file.name, percent: percentCompleted }))
               setProgresses((pre) => ({
                 ...pre,
@@ -110,13 +113,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
               }))
             })
 
-            if (result.status === 'duplicated') {
-              uploadErrors[file.name] = t('documentPanel.uploadDocuments.fileUploader.duplicateFile')
-              setFileErrors(prev => ({
-                ...prev,
-                [file.name]: t('documentPanel.uploadDocuments.fileUploader.duplicateFile')
-              }))
-            } else if (result.status !== 'success') {
+            if (result.status !== 'success') {
               uploadErrors[file.name] = result.message
               setFileErrors(prev => ({
                 ...prev,
@@ -125,19 +122,40 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
             } else {
               // Mark that we had at least one successful upload
               hasSuccessfulUpload = true
+              if (!batchProbeTriggered) {
+                batchProbeTriggered = true
+                onUploadBatchAccepted?.()
+              }
             }
           } catch (err) {
             console.error(`Upload failed for ${file.name}:`, err)
 
             // Handle HTTP errors, including 400 errors
             let errorMsg = errorMessage(err)
+            const duplicateFileMsg = t('documentPanel.uploadDocuments.fileUploader.duplicateFile')
 
             // If it's an axios error with response data, try to extract more detailed error info
             if (err && typeof err === 'object' && 'response' in err) {
               const axiosError = err as { response?: { status: number, data?: { detail?: string } } }
-              if (axiosError.response?.status === 400) {
-                // Extract specific error message from backend response
-                errorMsg = axiosError.response.data?.detail || errorMsg
+              const status = axiosError.response?.status
+              const detail = axiosError.response?.data?.detail
+              if (status === 409) {
+                // Server now rejects same-name uploads with HTTP 409 instead of
+                // returning a 200 ``status="duplicated"`` payload.  Map the most
+                // common cases (existing record / file in INPUT dir) back to the
+                // dedicated "duplicate file" UI affordance, and surface other
+                // 409 reasons (pipeline busy / scanning) verbatim from the
+                // server detail so users can tell why they were rejected.
+                if (
+                  typeof detail === 'string' &&
+                  (/already contains/i.test(detail) || /Status:/i.test(detail))
+                ) {
+                  errorMsg = duplicateFileMsg
+                } else {
+                  errorMsg = detail || errorMsg
+                }
+              } else if (status === 400) {
+                errorMsg = detail || errorMsg
               }
 
               // Set progress to 100% to display error message
@@ -182,7 +200,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
         setIsUploading(false)
       }
     },
-    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, selectedScheme]
+    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted]
   )
 
   return (
@@ -208,11 +226,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
         <DialogHeader>
           <DialogTitle>{t('documentPanel.uploadDocuments.title')}</DialogTitle>
           <DialogDescription>
-            {selectedScheme ? (
-              <>{t('schemeManager.upload.currentScheme')}<strong>{selectedScheme.name}</strong></>
-            ) : (
-              t('schemeManager.upload.noSchemeMessage')
-            )}
+            {t('documentPanel.uploadDocuments.description')}
           </DialogDescription>
         </DialogHeader>
         <FileUploader

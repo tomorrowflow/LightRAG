@@ -26,7 +26,7 @@ from lightrag.exceptions import (
 from lightrag.api import __api_version__
 
 import numpy as np
-from typing import Optional, Union
+from typing import Any, Optional, Union
 from lightrag.utils import (
     wrap_embedding_func_with_attrs,
     logger,
@@ -94,6 +94,7 @@ async def _ollama_model_if_cache(
     system_prompt=None,
     history_messages=[],
     enable_cot: bool = False,
+    image_inputs: list[Any] | None = None,
     **kwargs,
 ) -> Union[str, AsyncIterator[str]]:
     """Call Ollama chat API with OpenAI-style structured-output compatibility.
@@ -161,7 +162,13 @@ async def _ollama_model_if_cache(
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.extend(history_messages)
-        messages.append({"role": "user", "content": prompt})
+        user_message: dict[str, Any] = {"role": "user", "content": prompt}
+        if image_inputs:
+            from lightrag.llm._vision_utils import normalize_image_inputs
+
+            normalized_images = normalize_image_inputs(image_inputs)
+            user_message["images"] = [img.base64_str for img in normalized_images]
+        messages.append(user_message)
 
         response = await ollama_client.chat(model=model, messages=messages, **kwargs)
         if stream:

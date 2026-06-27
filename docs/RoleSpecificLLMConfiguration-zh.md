@@ -8,10 +8,10 @@ LightRAG 支持为不同处理阶段配置不同的 LLM 或 VLM。这个机制�
 
 | 角色 | 用途 |
 | --- | --- |
-| `EXTRACT` | 实体/关系抽取，以及实体/关系描述摘要。 |
-| `KEYWORD` | 查询关键词抽取，用于检索前的 high-level / low-level keyword 生成。 |
-| `QUERY` | 最终问答、普通查询、bypass 查询，以及 Ollama-compatible API 的查询路径。 |
-| `VLM` | 多模态分析阶段，用于图片、表格、公式等内容的 VLM 分析。 |
+| `EXTRACT` | 文件插入阶段使用的模型，主要复杂实体关系抽取和摘要总结。建议配置关闭思考模式并具备处理复杂问题的高速模型，模型参数量建议为30B或以上，上下文长度至少为32KB。 |
+| `KEYWORD` | 查询阶段关键词抽取，用于检索前的 high-level / low-level keyword 生成。建议配置关闭思考模式的超高速模型，以提高查询阶段的响应速度。模型数量建议为7B或以上。 |
+| `QUERY` | 查询阶段用于根据召回内容最终问答用关乎问题。建议配置开启思考模式的高质量模型。模型能力越强，回答的质量会越高。模型参数量建议为30B或以上，上下文长度至少为32KB。 |
+| `VLM` | 文件插入阶段用于分析图片。需要配置具有图片识别能力的高质量模型。模型参数量建议为30B或以上。 |
 
 如果某个角色没有专门配置，LightRAG 会使用基础 `LLM_*` 配置。
 
@@ -26,10 +26,10 @@ LLM_BINDING_HOST=https://api.openai.com/v1
 LLM_BINDING_API_KEY=your_api_key
 
 # 所有 LLM 请求的默认超时时间
-LLM_TIMEOUT=180
+LLM_TIMEOUT=240
 
-# 所有 LLM 调用的默认最大并发数
-MAX_ASYNC=4
+# 所有 LLM 调用的默认最大并发数(MAX_ASYNC 作为兼容旧名仍可用)
+MAX_ASYNC_LLM=4
 ```
 
 常用字段：
@@ -41,7 +41,7 @@ MAX_ASYNC=4
 | `LLM_BINDING_HOST` | 基础 provider endpoint。对于 SDK 默认 endpoint，可使用对应 sentinel，例如 `DEFAULT_GEMINI_ENDPOINT` 或 `DEFAULT_BEDROCK_ENDPOINT`。 |
 | `LLM_BINDING_API_KEY` | 基础 API key。Bedrock 不使用这个字段。 |
 | `LLM_TIMEOUT` | 基础 LLM timeout。角色未设置 timeout 时继承它。 |
-| `MAX_ASYNC` | 基础 LLM 最大并发。角色未设置 `MAX_ASYNC_{ROLE}_LLM` 时继承它。 |
+| `MAX_ASYNC_LLM` | 基础 LLM 最大并发。角色未设置 `{ROLE}_MAX_ASYNC_LLM` 时继承它。`MAX_ASYNC` 作为兼容旧名仍可用。 |
 
 ## 角色覆盖变量
 
@@ -52,8 +52,8 @@ QUERY_LLM_BINDING=openai
 QUERY_LLM_MODEL=gpt-5
 QUERY_LLM_BINDING_HOST=https://api.openai.com/v1
 QUERY_LLM_BINDING_API_KEY=your_query_api_key
-MAX_ASYNC_QUERY_LLM=2
-LLM_TIMEOUT_QUERY_LLM=240
+QUERY_MAX_ASYNC_LLM=2
+QUERY_LLM_TIMEOUT=240
 ```
 
 变量格式：
@@ -64,8 +64,8 @@ LLM_TIMEOUT_QUERY_LLM=240
 | `{ROLE}_LLM_MODEL` | 覆盖角色模型名。 |
 | `{ROLE}_LLM_BINDING_HOST` | 覆盖角色 endpoint。 |
 | `{ROLE}_LLM_BINDING_API_KEY` | 覆盖角色 API key。Bedrock 不支持。 |
-| `MAX_ASYNC_{ROLE}_LLM` | 覆盖角色最大并发。未设置时继承 `MAX_ASYNC`。 |
-| `LLM_TIMEOUT_{ROLE}_LLM` | 覆盖角色 timeout。未设置时继承 `LLM_TIMEOUT`。 |
+| `{ROLE}_MAX_ASYNC_LLM` | 覆盖角色最大并发。未设置时继承 `MAX_ASYNC_LLM`。 |
+| `{ROLE}_LLM_TIMEOUT` | 覆盖角色 timeout。未设置时继承 `LLM_TIMEOUT`。 |
 
 ## Provider 参数覆盖
 
@@ -109,8 +109,8 @@ VLM_GEMINI_LLM_TEMPERATURE=0.2
 - 未设置 `{ROLE}_LLM_MODEL` 时继承 `LLM_MODEL`。
 - 未设置 `{ROLE}_LLM_BINDING_HOST` 时继承 `LLM_BINDING_HOST`。
 - 未设置 `{ROLE}_LLM_BINDING_API_KEY` 时继承 `LLM_BINDING_API_KEY`。
-- 未设置 `LLM_TIMEOUT_{ROLE}_LLM` 时继承 `LLM_TIMEOUT`。
-- 未设置 `MAX_ASYNC_{ROLE}_LLM` 时继承 `MAX_ASYNC`。
+- 未设置 `{ROLE}_LLM_TIMEOUT` 时继承 `LLM_TIMEOUT`。
+- 未设置 `{ROLE}_MAX_ASYNC_LLM` 时继承 `MAX_ASYNC_LLM`。
 - provider 参数先继承基础 provider options，再叠加角色专属 provider options。
 
 因此，同一个 provider 下只想换模型时，只需要写模型名：
@@ -204,7 +204,7 @@ LLM_BINDING_API_KEY=your_api_key
 OPENAI_LLM_REASONING_EFFORT=minimal
 
 QUERY_LLM_MODEL=gpt-5
-MAX_ASYNC_QUERY_LLM=2
+QUERY_MAX_ASYNC_LLM=2
 ```
 
 `QUERY` 会继承基础 host、API key 和 `OPENAI_LLM_REASONING_EFFORT`。
@@ -224,7 +224,7 @@ OPENAI_LLM_MAX_COMPLETION_TOKENS=4096
 QUERY_LLM_MODEL=gpt-5
 QUERY_OPENAI_LLM_REASONING_EFFORT=medium
 QUERY_OPENAI_LLM_MAX_COMPLETION_TOKENS=9000
-LLM_TIMEOUT_QUERY_LLM=240
+QUERY_LLM_TIMEOUT=240
 ```
 
 ### 3. 同 provider 使用不同 endpoint 和 API key
@@ -244,8 +244,8 @@ LLM_BINDING=openai
 LLM_MODEL=gpt-5-mini
 LLM_BINDING_HOST=https://api.openai.com/v1
 LLM_BINDING_API_KEY=your_extract_openai_api_key
-LLM_TIMEOUT=180
-MAX_ASYNC=4
+LLM_TIMEOUT=240
+MAX_ASYNC_LLM=4
 
 ###########################################################################
 # IMPORTANT:
@@ -264,8 +264,8 @@ EXTRACT_LLM_BINDING_HOST=https://api.openai.com/v1
 EXTRACT_LLM_BINDING_API_KEY=your_extract_openai_api_key
 EXTRACT_OPENAI_LLM_REASONING_EFFORT=low
 EXTRACT_OPENAI_LLM_MAX_COMPLETION_TOKENS=4096
-MAX_ASYNC_EXTRACT_LLM=4
-LLM_TIMEOUT_EXTRACT_LLM=180
+EXTRACT_MAX_ASYNC_LLM=4
+EXTRACT_LLM_TIMEOUT=180
 
 ###########################################################################
 # QUERY: OpenAI official API, gpt-5.4, separate API key
@@ -276,8 +276,8 @@ QUERY_LLM_BINDING_HOST=https://api.openai.com/v1
 QUERY_LLM_BINDING_API_KEY=your_query_openai_api_key
 QUERY_OPENAI_LLM_REASONING_EFFORT=medium
 QUERY_OPENAI_LLM_MAX_COMPLETION_TOKENS=9000
-MAX_ASYNC_QUERY_LLM=2
-LLM_TIMEOUT_QUERY_LLM=240
+QUERY_MAX_ASYNC_LLM=2
+QUERY_LLM_TIMEOUT=240
 
 ###########################################################################
 # KEYWORD: local vLLM OpenAI-compatible endpoint, Qwen3.5-35B-A3B
@@ -292,8 +292,8 @@ KEYWORD_LLM_BINDING_API_KEY=local-vllm-api-key
 KEYWORD_OPENAI_LLM_MAX_TOKENS=2048
 # Optional for Qwen-style models served by vLLM when you want to disable thinking.
 KEYWORD_OPENAI_LLM_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}'
-MAX_ASYNC_KEYWORD_LLM=4
-LLM_TIMEOUT_KEYWORD_LLM=180
+KEYWORD_MAX_ASYNC_LLM=4
+KEYWORD_LLM_TIMEOUT=60
 ```
 
 这个模式不是跨 provider，因为三个角色的 binding 都是 `openai`。LightRAG 会分别把每个角色的 `*_LLM_BINDING_HOST` 和 `*_LLM_BINDING_API_KEY` 传给 OpenAI-compatible client。
@@ -325,6 +325,8 @@ KEYWORD_OLLAMA_LLM_NUM_CTX=32768
 适合文本任务使用便宜模型，多模态分析使用视觉语言模型：
 
 ```env
+VLM_PROCESS_ENABLE=true
+
 LLM_BINDING=openai
 LLM_MODEL=gpt-5-mini
 LLM_BINDING_HOST=https://api.openai.com/v1
@@ -333,11 +335,13 @@ LLM_BINDING_API_KEY=your_api_key
 VLM_LLM_BINDING=openai
 VLM_LLM_MODEL=gpt-4o
 VLM_OPENAI_LLM_MAX_TOKENS=4096
-MAX_ASYNC_VLM_LLM=2
-LLM_TIMEOUT_VLM_LLM=240
+VLM_MAX_ASYNC_LLM=2
+VLM_LLM_TIMEOUT=240
 ```
 
 如果 VLM 使用同一个 provider 和 key，可以省略 `VLM_LLM_BINDING_HOST` 与 `VLM_LLM_BINDING_API_KEY`。
+
+`VLM_PROCESS_ENABLE` 是多模态分析的总开关：设为 `false` 时，pipeline 会对每个多模态 item 输出 warning 并跳过，不调用 VLM；设为 `true` 时，生效的 VLM binding（设置了 `VLM_LLM_BINDING` 时取该值，否则取 `LLM_BINDING`）必须支持图片输入。当前支持视觉输入的 provider 包括：`openai`、`azure_openai`、`gemini`、`bedrock`、`ollama`、`anthropic`。`lollms` 无法接收图片输入，会在启动时直接报错。
 
 ### 6. Bedrock 角色级 SigV4 凭证
 

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LightRAG is a Retrieval-Augmented Generation (RAG) framework that uses graph-based knowledge representation for enhanced information retrieval. The system extracts entities and relationships from documents, builds a knowledge graph, and uses multi-modal retrieval (local, global, hybrid, mix, naive) for queries.
 
-**This is a fork** of [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG) (`upstream` remote). The `origin` remote points to `tomorrowflow/LightRAG`. The fork adds RAGAnything integration, a retrieval-specific LLM option, a Scheme Manager UI, and various fixes. See [Fork-Specific Changes](#fork-specific-changes) below.
+**This is a fork** of [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG) (`upstream` remote). The `origin` remote points to `tomorrowflow/LightRAG`. The fork adds an explicit-document-ID insert option, an input-dir file lifecycle, parse-cache cleanup helpers, conditional pgvector, and various fixes. (An earlier bespoke RAGAnything integration and Scheme Manager UI were **removed** once upstream merged native multimodal parsing — see below.) See [Fork-Specific Changes](#fork-specific-changes) below.
 
 ## Core Architecture
 
@@ -280,24 +280,13 @@ Each LightRAG instance can use a `workspace` parameter for data isolation. Imple
 
 This fork (`tomorrowflow/LightRAG`) diverges from upstream (`HKUDS/LightRAG`) in the following ways:
 
-### RAGAnything / Multimodal Content Integration
+### RAGAnything / Multimodal — REMOVED (now upstream-native)
 
-- **`lightrag/ragmanager.py`** (new): Singleton `RAGManager` holding a global reference to a RAGAnything instance for multimodal processing.
-- **`lightrag/base.py`**: Added `READY` and `HANDLING` doc statuses. Added `multimodal_content` and `scheme_name` fields to `DocProcessingStatus`.
-- **`lightrag/lightrag.py`**: `insert()`/`ainsert()` accept `multimodal_content` and `scheme_name` params. After text processing, if multimodal content exists, `RAGManager._process_multimodal_content()` is called before marking as `PROCESSED`.
-- **`raganything`** submodule: Expected at `./raganything/` as a local dependency (configured in `pyproject.toml` under `[tool.uv.sources]`).
+The fork originally vendored `raganything` (a `RAGManager` singleton, a Scheme Manager UI, `multimodal_content`/`scheme_name` plumbing, and `READY`/`HANDLING` doc statuses). Upstream has since merged **native** multimodal parsing (MinerU/Docling parser routing in `lightrag/parser/`, `lightrag/multimodal_context.py`, `lightrag/prompt_multimodal.py`, the `analyze_multimodal` pipeline stage, and a `vlm` LLM role). The bespoke fork integration was therefore fully removed in favor of upstream's: there is no `raganything` dependency, no `RAGManager`, no Scheme Manager, and no `multimodal_content`/`scheme_name` fields. Use upstream's parser-engine selection (filename hints / `LIGHTRAG_PARSER`) and the `vlm` role for vision.
 
-### Retrieval-Specific LLM
+### Retrieval-Specific LLM — SUPERSEDED by upstream role LLMs
 
-- **`lightrag/lightrag.py`**: New `retrieval_llm_model_func` field allows a separate LLM for query operations (falls back to `llm_model_func`). New `retrieval_llm_model_name` field (env: `RETRIEVAL_LLM_MODEL`) is baked into the retrieval function's `partial()` wrapper via `model_name` kwarg, so LLM bindings use the correct model name.
-- **`lightrag/operate.py`**: `kg_query`, `extract_keywords_only`, and `naive_query` use `retrieval_llm_model_func` when available.
-- **LLM bindings** (`ollama.py`, `openai.py`, `anthropic.py`, `bedrock.py`, `hf.py`, `lollms.py`, `gemini.py`): All check for a `model_name` kwarg before falling back to `global_config["llm_model_name"]`.
-
-### Scheme Manager (WebUI)
-
-- **`lightrag_webui/src/components/documents/SchemeManager/`** (new): Dialog UI for managing processing "schemes" — configurations that select between LightRAG and RAGAnything frameworks, extraction tools (MinerU/Docling), and model sources.
-- **`lightrag_webui/src/contexts/SchemeContext.tsx`** (new): React context for sharing selected scheme across the UI.
-- **`lightrag_webui/src/api/lightrag.ts`**: Added `Scheme` type and CRUD API methods (`getSchemes`, `saveSchemes`, `addScheme`, `deleteScheme`) hitting `/documents/schemes` endpoints.
+The fork's `retrieval_llm_model_func` / `RETRIEVAL_LLM_MODEL` was superseded by upstream's role-based LLM system (`role_llm_funcs` with `query`/`keyword`/`extract`/`vlm` roles, configured via `QUERY_LLM_*` / `KEYWORD_LLM_*` env vars). `kg_query`, `extract_keywords_only`, and `naive_query` now route through `role_llm_funcs["query"]` / `["keyword"]`. To run a separate model for query-time operations, set `QUERY_LLM_*` / `KEYWORD_LLM_*` instead of `RETRIEVAL_LLM_*`.
 
 ### File Lifecycle on Insert
 
@@ -368,3 +357,7 @@ This fork (`tomorrowflow/LightRAG`) diverges from upstream (`HKUDS/LightRAG`) in
 - Significantly improves retrieval quality
 - Recommended models: `BAAI/bge-reranker-v2-m3`, Jina rerankers
 - Use "mix" mode when reranker is enabled
+
+## AGENTS.md
+
+Also follow the repository rules in [./AGENTS.md](./AGENTS.md).

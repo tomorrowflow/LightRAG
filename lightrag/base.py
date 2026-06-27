@@ -10,7 +10,6 @@ from typing import (
     Literal,
     TypedDict,
     TypeVar,
-    Callable,
     Optional,
     Dict,
     List,
@@ -24,7 +23,6 @@ from .constants import (
     DEFAULT_MAX_ENTITY_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
-    DEFAULT_HISTORY_TURNS,
     DEFAULT_OLLAMA_MODEL_NAME,
     DEFAULT_OLLAMA_MODEL_TAG,
     DEFAULT_OLLAMA_MODEL_SIZE,
@@ -141,24 +139,6 @@ class QueryParam:
     Format: [{"role": "user/assistant", "content": "message"}].
     """
 
-    # TODO: deprecated. No longer used in the codebase, all conversation_history messages is send to LLM
-    history_turns: int = int(os.getenv("HISTORY_TURNS", str(DEFAULT_HISTORY_TURNS)))
-    """Number of complete conversation turns (user-assistant pairs) to consider in the response context."""
-
-    # TODO(v1.5.0): remove model_func together with the override branches in
-    # operate.py (_warn_deprecated_query_model_func call sites) and the
-    # `model_func_override` path in utils.get_llm_cache_identity.
-    model_func: Callable[..., object] | None = None
-    """Deprecated optional override for the LLM model function.
-    Use role_llm_configs at initialization or LightRAG.aupdate_llm_role_config() /
-    LightRAG.update_llm_role_config() for runtime role LLM changes instead.
-    Kept for backward compatibility with direct Python callers.
-
-    Note: when set, the LLM cache key collapses to a single "override" identity,
-    so swapping the override across calls will reuse stale cached responses.
-    Use aupdate_llm_role_config() for cache-correct model swaps.
-    """
-
     user_prompt: str | None = None
     """User-provided prompt for the query.
     Addition instructions for LLM. If provided, this will be inject into the prompt template.
@@ -194,6 +174,20 @@ class StorageNameSpace(ABC):
     @abstractmethod
     async def index_done_callback(self) -> None:
         """Commit the storage operations after indexing"""
+
+    async def drop_pending_index_ops(self) -> None:
+        """Discard any not-yet-flushed buffered index ops.
+
+        Backends that defer writes to ``index_done_callback`` (via an
+        in-memory ``_pending_*`` buffer) override this to clear that buffer.
+        The pipeline calls it when a batch is aborting on an internal error:
+        every still-buffered record belongs to a document that is being
+        marked FAILED and fully reprocessed on the next run, so dropping the
+        buffer is safe and prevents the poisoned/stale records from being
+        re-flushed by the remaining in-flight documents or carried over to
+        the next batch. Immediate-write backends keep the default no-op.
+        """
+        return None
 
     @abstractmethod
     async def drop(self) -> dict[str, str]:
@@ -256,6 +250,10 @@ class BaseVectorStorage(StorageNameSpace, ABC):
 
         # Check if model_name exists (model_name is optional in EmbeddingFunc)
         model_name = getattr(self.embedding_func, "model_name", None)
+        if not isinstance(model_name, str):
+            return None
+
+        model_name = model_name.strip()
         if not model_name:
             return None
 
@@ -287,6 +285,16 @@ class BaseVectorStorage(StorageNameSpace, ABC):
         1. Changes will be persisted to disk during the next index_done_callback
         2. Only one process should updating the storage at a time before index_done_callback,
            KG-storage-log should be used to avoid data corruption
+
+        Multi-worker note:
+            Backends that buffer writes in process memory (e.g.
+            OpenSearchVectorDBStorage as of #3043) keep the buffer
+            process-local. In a multi-worker deployment (e.g.
+            lightrag-gunicorn) other workers will not observe these writes
+            until the writing worker has called index_done_callback().
+            Callers that depend on cross-worker read-after-write visibility
+            must explicitly await index_done_callback() before relying on
+            reads from another worker.
         """
 
     @abstractmethod
@@ -297,6 +305,9 @@ class BaseVectorStorage(StorageNameSpace, ABC):
         1. Changes will be persisted to disk during the next index_done_callback
         2. Only one process should updating the storage at a time before index_done_callback,
            KG-storage-log should be used to avoid data corruption
+
+        Multi-worker note: see ``upsert`` -- buffered tombstones are
+        process-local until index_done_callback() runs.
         """
 
     @abstractmethod
@@ -307,6 +318,11 @@ class BaseVectorStorage(StorageNameSpace, ABC):
         1. Changes will be persisted to disk during the next index_done_callback
         2. Only one process should updating the storage at a time before index_done_callback,
            KG-storage-log should be used to avoid data corruption
+
+        Multi-worker note: see ``upsert`` -- backends may prune their
+        in-process buffer in addition to issuing a server-side delete,
+        so cross-worker visibility still follows the index_done_callback
+        contract.
         """
 
     @abstractmethod
@@ -341,6 +357,9 @@ class BaseVectorStorage(StorageNameSpace, ABC):
         1. Changes will be persisted to disk during the next index_done_callback
         2. Only one process should updating the storage at a time before index_done_callback,
            KG-storage-log should be used to avoid data corruption
+
+        Multi-worker note: see ``upsert`` -- buffered tombstones are
+        process-local until index_done_callback() runs.
 
         Args:
             ids: List of vector IDs to be deleted
@@ -383,6 +402,17 @@ class BaseKVStorage(StorageNameSpace, ABC):
         Importance notes for in-memory storage:
         1. Changes will be persisted to disk during the next index_done_callback
         2. update flags to notify other processes that data persistence is needed
+
+        Multi-worker note:
+            Backends that buffer writes in process memory (e.g.
+            OpenSearchKVStorage as of the KV-batching change derived from
+            #2822) keep the buffer process-local. In a multi-worker
+            deployment (e.g. lightrag-gunicorn) other workers will not
+            observe these writes until the writing worker has called
+            index_done_callback(). Callers that depend on cross-worker
+            read-after-write visibility must explicitly await
+            index_done_callback() before relying on reads from another
+            worker.
         """
 
     @abstractmethod
@@ -392,6 +422,9 @@ class BaseKVStorage(StorageNameSpace, ABC):
         Importance notes for in-memory storage:
         1. Changes will be persisted to disk during the next index_done_callback
         2. update flags to notify other processes that data persistence is needed
+
+        Multi-worker note: see ``upsert`` -- buffered tombstones are
+        process-local until index_done_callback() runs.
 
         Args:
             ids (list[str]): List of document IDs to be deleted from storage
@@ -763,8 +796,6 @@ class DocStatus(str, Enum):
     PREPROCESSED is deprecated, kept for backward compatibility.
     """
 
-    READY = "ready"
-    HANDLING = "handling"
     PENDING = "pending"
     PARSING = "parsing"  # Phase 1: content extraction (parse_native/mineru/docling)
     ANALYZING = "analyzing"  # Phase 2: multimodal analysis (VLM)
@@ -783,7 +814,13 @@ class DocProcessingStatus:
     content_length: int
     """Total length of document"""
     file_path: str
-    """File path of the document"""
+    """Canonical basename of the document.
+
+    Always a hint-stripped basename (e.g. ``abc.docx``) or the literal
+    ``"unknown_source"`` sentinel; never carries directory components or
+    parser ``[hint]`` segments. UI display, filename-based dedup, and
+    citation paths all share this value.
+    """
     status: DocStatus
     """Current processing status"""
     created_at: str
@@ -800,11 +837,13 @@ class DocProcessingStatus:
     """Error message if failed"""
     metadata: dict[str, Any] = field(default_factory=dict)
     """Additional metadata"""
-    multimodal_content: list[dict[str, Any]] | None = None
-    """raganything: multimodal_content"""
-    scheme_name: str | None = None
-    """lightrag or raganything"""
     multimodal_processed: bool | None = field(default=None, repr=False)
+    content_hash: str | None = None
+    """MD5 hash of the underlying document content (raw text or source file).
+
+    Used together with file_path basename for duplicate detection. Empty for
+    pending_parse records whose content has not been extracted yet.
+    """
     """Internal field: indicates if multimodal processing is complete. Not shown in repr() but accessible for debugging."""
 
     def __post_init__(self):
@@ -909,6 +948,38 @@ class DocStatusStorage(BaseKVStorage, ABC):
         Returns:
             dict[str, Any] | None: Document data if found, None otherwise
             Returns the same format as get_by_ids method
+        """
+
+    @abstractmethod
+    async def get_doc_by_file_basename(
+        self, basename: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Get document by canonical file basename.
+
+        Used for filename-based deduplication. Callers must pass the canonical
+        basename; storage implementations only compare against the canonical
+        ``file_path`` persisted by the business layer.
+
+        Args:
+            basename: The filename basename to search for (e.g. "report.pdf").
+
+        Returns:
+            (doc_id, doc_data) when a matching record exists, otherwise None.
+        """
+
+    @abstractmethod
+    async def get_doc_by_content_hash(
+        self, content_hash: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Get document by content_hash field.
+
+        Used for content-hash deduplication of full documents.
+
+        Args:
+            content_hash: The content hash value to search for.
+
+        Returns:
+            (doc_id, doc_data) when a matching record exists, otherwise None.
         """
 
 

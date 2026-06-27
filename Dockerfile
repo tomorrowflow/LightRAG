@@ -44,9 +44,6 @@ COPY pyproject.toml .
 COPY setup.py .
 COPY uv.lock .
 
-# Copy local dependency
-COPY RAG-Anything/ ./raganything/
-
 # Install dependencies (base + API + offline extras) without the project to improve caching
 RUN --mount=type=cache,target=/root/.local/share/uv \
     uv sync --frozen --no-dev --extra api --extra offline --no-install-project --no-editable
@@ -110,7 +107,7 @@ RUN --mount=type=cache,target=/root/.local/share/uv \
     && /app/.venv/bin/python -m ensurepip --upgrade
 
 # Create persistent data directories AFTER package installation
-RUN mkdir -p /app/data/rag_storage /app/data/inputs /app/data/tiktoken
+RUN mkdir -p /app/data/rag_storage /app/data/inputs /app/data/prompts /app/data/tiktoken
 
 # Copy offline cache into the newly created directory
 COPY --from=builder /app/data/tiktoken /app/data/tiktoken
@@ -119,6 +116,7 @@ COPY --from=builder /app/data/tiktoken /app/data/tiktoken
 ENV TIKTOKEN_CACHE_DIR=/app/data/tiktoken
 ENV WORKING_DIR=/app/data/rag_storage
 ENV INPUT_DIR=/app/data/inputs
+ENV PROMPT_DIR=/app/data/prompts
 
 # Expose API port
 EXPOSE 9621

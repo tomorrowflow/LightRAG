@@ -33,6 +33,7 @@ services:
       - ./data/inputs:/app/data/inputs
       - ./data/outputs:/app/data/outputs
       - ./data/tiktoken:/app/data/tiktoken
+      - ./data/prompts:/app/data/prompts
       # Configuration file (read by LightRAG server at /app/.env)
       - ./.env:/app/.env:ro
     # Load all settings from .env; only override Docker-specific networking below
@@ -43,11 +44,11 @@ services:
       - LLM_BINDING_HOST=http://host.docker.internal:11434
       - EMBEDDING_BINDING_HOST=http://host.docker.internal:11434
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - OLLAMA_VISION_HOST=http://host.docker.internal:11434
       - RETRIEVAL_LLM_BINDING_HOST=http://host.docker.internal:11434
       # Container working paths
       - WORKING_DIR=/app/data/rag_storage
       - INPUT_DIR=/app/data/inputs
+      - PROMPT_DIR=/app/data/prompts
 
     depends_on:
       neo4j:

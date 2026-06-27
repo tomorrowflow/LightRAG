@@ -5,14 +5,12 @@ from pathlib import Path
 import asyncio
 import json
 import re
-import warnings
 import json_repair
 from typing import Any, AsyncIterator, overload, Literal
 from collections import Counter, defaultdict
 
 from lightrag.exceptions import (
     PipelineCancelledException,
-    ChunkTokenLimitExceededError,
 )
 from lightrag.utils import (
     logger,
@@ -20,6 +18,8 @@ from lightrag.utils import (
     Tokenizer,
     is_float_regex,
     sanitize_and_normalize_extracted_text,
+    sanitize_text_for_encoding,
+    repair_vlm_json_escape_damage_nested,
     pack_user_ass_to_openai_messages,
     split_string_by_multi_markers,
     truncate_list_by_token_size,
@@ -28,6 +28,7 @@ from lightrag.utils import (
     save_to_cache,
     CacheData,
     use_llm_func_with_cache,
+    get_env_value,
     get_llm_cache_identity,
     serialize_llm_cache_identity,
     update_chunk_cache_list,
@@ -55,12 +56,22 @@ from lightrag.base import (
     QueryResult,
     QueryContextResult,
 )
+from lightrag.chunk_schema import (
+    HEADING_BREADCRUMB_SEP,
+    format_heading_context,
+    format_parent_headings,
+    strip_internal_multimodal_markup_for_extraction,
+)
 from lightrag.prompt import PROMPTS, resolve_entity_extraction_prompt_profile
 from lightrag.constants import (
     GRAPH_FIELD_SEP,
     DEFAULT_MAX_ENTITY_TOKENS,
+    DEFAULT_MAX_EXTRACT_INPUT_TOKENS,
+    DEFAULT_MAX_SECTION_CONTEXT_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
+    DEFAULT_QUERY_PRIORITY,
+    DEFAULT_SUMMARY_PRIORITY,
     DEFAULT_RELATED_CHUNK_NUMBER,
     DEFAULT_KG_CHUNK_PICK_METHOD,
     DEFAULT_SUMMARY_LANGUAGE,
@@ -69,6 +80,7 @@ from lightrag.constants import (
     DEFAULT_FILE_PATH_MORE_PLACEHOLDER,
     DEFAULT_MAX_FILE_PATHS,
     DEFAULT_ENTITY_NAME_MAX_LENGTH,
+    DEFAULT_ENTITY_NAME_MAX_BYTES,
 )
 from lightrag.kg.shared_storage import get_storage_keyed_lock
 import time
@@ -78,16 +90,6 @@ from dotenv import load_dotenv
 # allows to use different .env file for each lightrag instance
 # the OS environment variables take precedence over the .env file
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
-
-
-def _warn_deprecated_query_model_func(context: str) -> None:
-    warnings.warn(
-        "QueryParam.model_func is deprecated and will be removed at v1.5.0. "
-        "Use LightRAG.aupdate_llm_role_config() instead. "
-        f"Deprecated override used for {context}.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
 
 
 def _get_relationship_vdb_timeout_seconds(global_config: dict[str, Any]) -> float:
@@ -116,24 +118,91 @@ def _format_relation_edge_label(edge_key: tuple[str, str] | list[str]) -> str:
 
 
 def _truncate_entity_identifier(
-    identifier: str, limit: int, chunk_key: str, identifier_role: str
+    identifier: str,
+    limit: int,
+    chunk_key: str,
+    identifier_role: str,
+    byte_limit: int = DEFAULT_ENTITY_NAME_MAX_BYTES,
 ) -> str:
-    """Truncate entity identifiers that exceed the configured length limit."""
+    """Truncate entity identifiers that exceed the configured length limit.
 
-    if len(identifier) <= limit:
+    Enforces both a character limit (``limit``) and a UTF-8 byte limit
+    (``byte_limit``). Milvus validates VARCHAR ``max_length`` in BYTES, not
+    characters, so a CJK identifier within the character limit can still
+    overflow the field (e.g. 256 Chinese chars ~= 694 bytes > 512). The byte
+    truncation cuts on a character boundary so the result stays valid UTF-8.
+    """
+
+    char_len = len(identifier)
+    byte_len = len(identifier.encode("utf-8"))
+    if char_len <= limit and byte_len <= byte_limit:
         return identifier
 
     display_value = identifier[:limit]
-    preview = identifier[:20]  # Show first 20 characters as preview
+    encoded = display_value.encode("utf-8")
+    if len(encoded) > byte_limit:
+        # Drop the partial trailing multi-byte char left by the byte slice.
+        display_value = encoded[:byte_limit].decode("utf-8", errors="ignore")
+    preview = identifier[:50]  # Show first 50 characters as preview
     logger.warning(
-        "%s: %s len %d > %d chars (Name: '%s...')",
+        "%s: %s len %d chars / %d bytes > %d chars / %d bytes (Name: '%s...')",
         chunk_key,
         identifier_role,
-        len(identifier),
+        char_len,
+        byte_len,
         limit,
+        byte_limit,
         preview,
     )
     return display_value
+
+
+def _truncate_section_context(
+    heading_path: str,
+    tokenizer: "Tokenizer | None",
+    max_tokens: int,
+) -> str:
+    """Token-budget the `---Section Context---` breadcrumb before injection.
+
+    The breadcrumb is metadata layered on top of the (already chunk-sized)
+    input text, so an unbounded heading chain could push an otherwise-valid
+    chunk past the provider context window. When the path exceeds ``max_tokens``
+    we first collapse it to the **first** level (top-level document location)
+    and the **last/leaf** level (the chunk's own, most-specific section),
+    eliding the middle with ``first → … → leaf``. A token-dense path (emoji /
+    byte-level tokenizers) can still exceed the budget even with one or two
+    levels, so a hard token cap is always applied as a backstop — the returned
+    string is guaranteed to fit ``max_tokens``. ``max_tokens <= 0`` or a missing
+    tokenizer disables the cap.
+    """
+    if not heading_path or tokenizer is None or max_tokens <= 0:
+        return heading_path
+    if len(tokenizer.encode(heading_path)) <= max_tokens:
+        return heading_path
+    levels = heading_path.split(HEADING_BREADCRUMB_SEP)
+    if len(levels) >= 3:
+        heading_path = (
+            f"{levels[0]}{HEADING_BREADCRUMB_SEP}…{HEADING_BREADCRUMB_SEP}{levels[-1]}"
+        )
+    # Backstop: enforce the cap for token-dense short paths (and any collapsed
+    # form that is still over budget). Prefer a trailing ellipsis when it fits,
+    # but re-encode each candidate because custom/BPE tokenizers may tokenize
+    # the suffix differently when it is appended to decoded prefix text.
+    tokens = tokenizer.encode(heading_path)
+    if len(tokens) > max_tokens:
+        ellipsis = "…"
+        ellipsis_token_count = len(tokenizer.encode(ellipsis))
+        if ellipsis_token_count <= max_tokens:
+            for keep in range(max_tokens - ellipsis_token_count, -1, -1):
+                candidate = tokenizer.decode(tokens[:keep]).rstrip() + ellipsis
+                if len(tokenizer.encode(candidate)) <= max_tokens:
+                    return candidate
+        for keep in range(max_tokens, -1, -1):
+            candidate = tokenizer.decode(tokens[:keep]).rstrip()
+            if len(tokenizer.encode(candidate)) <= max_tokens:
+                return candidate
+        return ""
+    return heading_path
 
 
 def _truncate_vdb_content(content: str, global_config: dict, content_label: str) -> str:
@@ -168,70 +237,29 @@ def _truncate_vdb_content(content: str, global_config: dict, content_label: str)
     return truncated_content
 
 
-def chunking_by_token_size(
-    tokenizer: Tokenizer,
-    content: str,
-    split_by_character: str | None = None,
-    split_by_character_only: bool = False,
-    chunk_overlap_token_size: int = 100,
-    chunk_token_size: int = 1200,
-) -> list[dict[str, Any]]:
-    tokens = tokenizer.encode(content)
-    results: list[dict[str, Any]] = []
-    if split_by_character:
-        raw_chunks = content.split(split_by_character)
-        new_chunks = []
-        if split_by_character_only:
-            for chunk in raw_chunks:
-                _tokens = tokenizer.encode(chunk)
-                if len(_tokens) > chunk_token_size:
-                    logger.warning(
-                        "Chunk split_by_character exceeds token limit: len=%d limit=%d",
-                        len(_tokens),
-                        chunk_token_size,
-                    )
-                    raise ChunkTokenLimitExceededError(
-                        chunk_tokens=len(_tokens),
-                        chunk_token_limit=chunk_token_size,
-                        chunk_preview=chunk[:120],
-                    )
-                new_chunks.append((len(_tokens), chunk))
-        else:
-            for chunk in raw_chunks:
-                _tokens = tokenizer.encode(chunk)
-                if len(_tokens) > chunk_token_size:
-                    for start in range(
-                        0, len(_tokens), chunk_token_size - chunk_overlap_token_size
-                    ):
-                        chunk_content = tokenizer.decode(
-                            _tokens[start : start + chunk_token_size]
-                        )
-                        new_chunks.append(
-                            (min(chunk_token_size, len(_tokens) - start), chunk_content)
-                        )
-                else:
-                    new_chunks.append((len(_tokens), chunk))
-        for index, (_len, chunk) in enumerate(new_chunks):
-            results.append(
-                {
-                    "tokens": _len,
-                    "content": chunk.strip(),
-                    "chunk_order_index": index,
-                }
-            )
-    else:
-        for index, start in enumerate(
-            range(0, len(tokens), chunk_token_size - chunk_overlap_token_size)
-        ):
-            chunk_content = tokenizer.decode(tokens[start : start + chunk_token_size])
-            results.append(
-                {
-                    "tokens": min(chunk_token_size, len(tokens) - start),
-                    "content": chunk_content.strip(),
-                    "chunk_order_index": index,
-                }
-            )
-    return results
+_MM_DISPLAY_NAME_PATTERN = re.compile(
+    r"^\[(?:Image|Table|Equation) Name\](.+)$",
+    flags=re.MULTILINE,
+)
+
+
+def _parse_mm_display_name(content: str, fallback: str) -> str:
+    """Return the friendly name embedded in a multimodal chunk.
+
+    Matches the leading ``[Image Name]…`` / ``[Table Name]…`` /
+    ``[Equation Name]…`` segment produced by
+    ``LightRAG._build_mm_chunks_from_sidecars`` — the producer-side
+    contract is documented in that function's ``_render`` helper. Falls
+    back to the sidecar id when the segment is missing or empty so
+    callers never end up with a blank label.
+    """
+    if content:
+        match = _MM_DISPLAY_NAME_PATTERN.search(content)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate:
+                return candidate
+    return fallback
 
 
 async def _handle_entity_relation_summary(
@@ -265,8 +293,11 @@ async def _handle_entity_relation_summary(
         return "", False
 
     # If only one description, return it directly (no need for LLM call)
+    # Still sanitize: descriptions read back from existing graph nodes (or
+    # injected by non-extraction producers) may carry XML-illegal control
+    # characters that would crash the GraphML flush downstream.
     if len(description_list) == 1:
-        return description_list[0], False
+        return sanitize_text_for_encoding(description_list[0]), False
 
     # Get configuration
     tokenizer: Tokenizer = global_config["tokenizer"]
@@ -293,7 +324,12 @@ async def _handle_entity_relation_summary(
                 and total_tokens < summary_max_tokens
             ):
                 # no LLM needed, just join the descriptions
-                final_description = separator.join(current_list)
+                # Sanitize for the same reason as the single-description
+                # early return above: inputs merged from pre-existing graph
+                # data are not guaranteed XML-safe.
+                final_description = sanitize_text_for_encoding(
+                    separator.join(current_list)
+                )
                 return final_description if final_description else "", llm_was_used
             else:
                 if total_tokens > summary_context_size and len(current_list) <= 2:
@@ -391,7 +427,7 @@ async def _summarize_descriptions(
     """
     use_llm_func: callable = global_config["role_llm_funcs"]["extract"]
     # Apply higher priority (8) to entity/relation summary tasks
-    use_llm_func = partial(use_llm_func, _priority=8)
+    use_llm_func = partial(use_llm_func, _priority=DEFAULT_SUMMARY_PRIORITY)
 
     addon_params = global_config.get("addon_params") or {}
     language = global_config.get("_resolved_summary_language")
@@ -440,6 +476,12 @@ async def _summarize_descriptions(
         cache_type="summary",
         llm_cache_identity=get_llm_cache_identity(global_config, "extract"),
     )
+
+    # The LLM response is the only description path that bypasses
+    # extraction-time sanitization; control chars / surrogates left here
+    # would later break GraphML (XML) serialization on write. Strip them
+    # at the source, symmetric with how extracted descriptions are cleaned.
+    summary = sanitize_text_for_encoding(summary)
 
     # Check summary token length against embedding limit
     embedding_token_limit = global_config.get("embedding_token_limit")
@@ -704,6 +746,13 @@ async def _process_json_extraction_result(
             f"{chunk_key}: JSON extraction result is not a dict, got {type(parsed).__name__}"
         )
         return dict(maybe_nodes), dict(maybe_edges)
+
+    # Models quoting LaTeX in descriptions routinely under-escape backslashes
+    # ("\frac" is valid JSON meaning form feed + "rac"); restore the zero-risk
+    # cases before sanitization would otherwise delete the control characters
+    # and leave a maimed formula. Covers initial extraction, gleaning, and
+    # cache-rebuild — all three flow through this parser.
+    parsed = repair_vlm_json_escape_damage_nested(parsed, context=chunk_key)
 
     # Process entities
     entities_list = parsed.get("entities", [])
@@ -3314,6 +3363,17 @@ async def extract_entities(
 
     use_llm_func: callable = global_config["role_llm_funcs"]["extract"]
     entity_extract_max_gleaning = global_config["entity_extract_max_gleaning"]
+    # Cap on the gleaning LLM call's combined input (system + history user
+    # prompt + history assistant response + continue prompt).  Pulled from
+    # the same env knob that gates ``analyze_multimodal``'s sidecar trimming
+    # so both EXTRACT-role consumers share one source of truth.  ``0``
+    # disables the gleaning guard (gleaning always runs regardless of size).
+    max_extract_input_tokens = get_env_value(
+        "MAX_EXTRACT_INPUT_TOKENS",
+        DEFAULT_MAX_EXTRACT_INPUT_TOKENS,
+        int,
+    )
+    extract_tokenizer: Tokenizer | None = global_config.get("tokenizer")
 
     # Check if JSON structured output mode is enabled
     use_json_extraction = global_config.get("entity_extraction_use_json", False)
@@ -3384,9 +3444,33 @@ async def extract_entities(
         nonlocal processed_chunks
         chunk_key = chunk_key_dp[0]
         chunk_dp = chunk_key_dp[1]
-        content = chunk_dp["content"]
+        # Strip parser-internal markup (<cite refid>, <drawing id/path/src>,
+        # <equation id>) before building the extraction prompt. The stored
+        # chunk content is left intact so query-time citations still resolve.
+        content = strip_internal_multimodal_markup_for_extraction(chunk_dp["content"])
         # Get file path from chunk data or use default
         file_path = chunk_dp.get("file_path", "unknown_source")
+
+        # Build the optional `---Section Context---` block from the chunk's
+        # heading breadcrumb. The marker/wrapping lives entirely in the prompt
+        # template; here we only produce the data and decide whether to inject
+        # it. Each level is char-capped inside format_heading_context, and the
+        # joined path is token-budgeted here so heading metadata can never push
+        # an otherwise-valid chunk past the provider context window. When the
+        # chunk carries no heading, the block is an empty string so the user
+        # prompt stays byte-identical to the no-context form.
+        heading_path = _truncate_section_context(
+            format_heading_context(chunk_dp),
+            extract_tokenizer,
+            DEFAULT_MAX_SECTION_CONTEXT_TOKENS,
+        )
+        heading_context_block = (
+            PROMPTS["entity_extraction_section_context"].format(
+                heading_path=heading_path
+            )
+            if heading_path
+            else ""
+        )
 
         # Create cache keys collector for batch processing
         cache_keys_collector = []
@@ -3398,7 +3482,13 @@ async def extract_entities(
             ].format(**context_base)
             entity_extraction_user_prompt = PROMPTS[
                 "entity_extraction_json_user_prompt"
-            ].format(**{**context_base, "input_text": content})
+            ].format(
+                **{
+                    **context_base,
+                    "input_text": content,
+                    "heading_context_block": heading_context_block,
+                }
+            )
             entity_continue_extraction_user_prompt = PROMPTS[
                 "entity_continue_extraction_json_user_prompt"
             ].format(**context_base)
@@ -3409,7 +3499,13 @@ async def extract_entities(
             ].format(**context_base)
             entity_extraction_user_prompt = PROMPTS[
                 "entity_extraction_user_prompt"
-            ].format(**{**context_base, "input_text": content})
+            ].format(
+                **{
+                    **context_base,
+                    "input_text": content,
+                    "heading_context_block": heading_context_block,
+                }
+            )
             entity_continue_extraction_user_prompt = PROMPTS[
                 "entity_continue_extraction_user_prompt"
             ].format(**{**context_base, "input_text": content})
@@ -3449,7 +3545,36 @@ async def extract_entities(
             )
 
         # Process additional gleaning results only 1 time when entity_extract_max_gleaning is greater than zero.
-        if entity_extract_max_gleaning > 0:
+        run_gleaning = entity_extract_max_gleaning > 0
+        if (
+            run_gleaning
+            and extract_tokenizer is not None
+            and max_extract_input_tokens > 0
+        ):
+            # Gleaning replays the initial extraction's user/assistant pair
+            # via ``history_messages`` and appends a "continue" instruction.
+            # When the initial response was large (many entities/edges) or
+            # the chunk content is itself near the budget, that combined
+            # payload can blow past MAX_EXTRACT_INPUT_TOKENS and yield a
+            # provider ``context_length_exceeded`` error.  Pre-check here
+            # and skip rather than fail.
+            gleaning_token_count = (
+                len(extract_tokenizer.encode(entity_extraction_system_prompt))
+                + sum(
+                    len(extract_tokenizer.encode(msg.get("content", "") or ""))
+                    for msg in history
+                )
+                + len(extract_tokenizer.encode(entity_continue_extraction_user_prompt))
+            )
+            if gleaning_token_count > max_extract_input_tokens:
+                logger.warning(
+                    f"Gleaning stopped for chunk {chunk_key}: "
+                    f"Input tokens ({gleaning_token_count}) exceeded limit "
+                    f"({max_extract_input_tokens})."
+                )
+                run_gleaning = False
+
+        if run_gleaning:
             glean_result, timestamp = await use_llm_func_with_cache(
                 entity_continue_extraction_user_prompt,
                 use_llm_func,
@@ -3521,6 +3646,76 @@ async def extract_entities(
                     # New edge from gleaning stage
                     maybe_edges[edge_key] = list(glean_edge_list)
                 await _cooperative_yield(i, every=8)
+
+        # Inject multimodal entity + associations for drawing/table/equation
+        # chunks. Placed before update_chunk_cache_list so the per-chunk
+        # cache write still happens after; placed inside the chunk's
+        # concurrency slot (rather than the centralized post-pass that used
+        # to live in utils_pipeline.augment_chunk_results_with_mm_entities)
+        # so each multimodal chunk benefits from the chunk-level concurrency
+        # already enforced by extract_entities.
+        sidecar_block = chunk_dp.get("sidecar")
+        if isinstance(sidecar_block, dict):
+            sidecar_type = sidecar_block.get("type")
+            sidecar_id = sidecar_block.get("id")
+            if (
+                sidecar_type in {"drawing", "table", "equation"}
+                and isinstance(sidecar_id, str)
+                and sidecar_id
+            ):
+                mm_entity_name = sidecar_id
+                now_ts = int(time.time())
+                mm_nodes_list = maybe_nodes.setdefault(mm_entity_name, [])
+                mm_nodes_list.append(
+                    {
+                        "entity_name": mm_entity_name,
+                        "entity_type": sidecar_type,
+                        # description == the full multimodal chunk content so
+                        # the extracted entity carries the same grounding
+                        # surface the prompt produced; analyze_multimodal's
+                        # description/name field is already inlined there.
+                        "description": chunk_dp.get("content", "") or "",
+                        "source_id": chunk_key,
+                        "file_path": file_path,
+                        "timestamp": now_ts,
+                    }
+                )
+                heading_block = chunk_dp.get("heading")
+                heading_label = ""
+                if isinstance(heading_block, dict):
+                    heading_label = str(heading_block.get("heading") or "").strip()
+                # Omit the "in section ..." clause entirely when the chunk has no
+                # real heading — a literal "unknown" filler would otherwise leak
+                # into the relation description, embedding, and retrieval as noise.
+                location = (
+                    f"in section {heading_label} of document"
+                    if heading_label
+                    else "of document"
+                )
+                mm_display_name = _parse_mm_display_name(
+                    chunk_dp.get("content", "") or "", sidecar_id
+                )
+                for tgt in list(maybe_nodes.keys()):
+                    if tgt == mm_entity_name:
+                        continue
+                    edge_key = (mm_entity_name, tgt)
+                    edge_list = maybe_edges.setdefault(edge_key, [])
+                    edge_list.append(
+                        {
+                            "src_id": mm_entity_name,
+                            "tgt_id": tgt,
+                            "weight": 1.0,
+                            "description": (
+                                f"{tgt} is associated with {sidecar_type} "
+                                f"{mm_display_name} {location} "
+                                f'"{file_path}"'
+                            ),
+                            "keywords": "associated with, contained in",
+                            "source_id": chunk_key,
+                            "file_path": file_path,
+                            "timestamp": now_ts,
+                        }
+                    )
 
         # Batch update chunk's llm_cache_list with all collected cache keys
         if cache_keys_collector and text_chunks_storage:
@@ -3661,15 +3856,11 @@ async def kg_query(
     if not query:
         return QueryResult(content=PROMPTS["fail_response"])
 
-    if query_param.model_func:
-        use_model_func = query_param.model_func
-    else:
-        use_model_func = global_config.get("retrieval_llm_model_func", global_config["llm_model_func"])
-        # Apply higher priority (5) to query relation LLM function
-        use_model_func = partial(use_model_func, _priority=5)
-    llm_cache_identity = get_llm_cache_identity(
-        global_config, "query", query_param.model_func
+    # Apply higher priority (5) to query relation LLM function
+    use_model_func = partial(
+        global_config["role_llm_funcs"]["query"], _priority=DEFAULT_QUERY_PRIORITY
     )
+    llm_cache_identity = get_llm_cache_identity(global_config, "query")
 
     hl_keywords, ll_keywords = await get_keywords_from_query(
         query, query_param, global_config, hashing_kv
@@ -3758,6 +3949,7 @@ async def kg_query(
         ll_keywords_str,
         query_param.user_prompt or "",
         query_param.enable_rerank,
+        global_config.get("enable_content_headings", False),
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
     )
@@ -3773,8 +3965,6 @@ async def kg_query(
         )
         response = cached_response
     else:
-        if query_param.model_func:
-            _warn_deprecated_query_model_func("KG query generation")
         response = await use_model_func(
             user_query,
             system_prompt=sys_prompt,
@@ -3796,6 +3986,9 @@ async def kg_query(
                 "ll_keywords": ll_keywords_str,
                 "user_prompt": query_param.user_prompt or "",
                 "enable_rerank": query_param.enable_rerank,
+                "enable_content_headings": global_config.get(
+                    "enable_content_headings", False
+                ),
             }
             await save_to_cache(
                 hashing_kv,
@@ -4009,9 +4202,7 @@ async def extract_keywords_only(
         language = addon_params.get("language", DEFAULT_SUMMARY_LANGUAGE)
 
     # 2. Handle cache if needed - add cache type for keywords
-    llm_cache_identity = get_llm_cache_identity(
-        global_config, "keyword", param.model_func
-    )
+    llm_cache_identity = get_llm_cache_identity(global_config, "keyword")
     args_hash = compute_args_hash(
         param.mode,
         text,
@@ -4048,13 +4239,10 @@ async def extract_keywords_only(
     )
 
     # 4. Call the LLM for keyword extraction
-    if param.model_func:
-        _warn_deprecated_query_model_func("keyword extraction")
-        use_model_func = param.model_func
-    else:
-        use_model_func = global_config.get("retrieval_llm_model_func", global_config["llm_model_func"])
-        # Apply higher priority (5) to query relation LLM function
-        use_model_func = partial(use_model_func, _priority=5)
+    # Apply higher priority (5) to query relation LLM function
+    use_model_func = partial(
+        global_config["role_llm_funcs"]["keyword"], _priority=DEFAULT_QUERY_PRIORITY
+    )
 
     result = await use_model_func(kw_prompt, response_format={"type": "json_object"})
 
@@ -4219,7 +4407,7 @@ async def _perform_kg_search(
         if texts_to_embed:
             try:
                 all_embeddings = await actual_embedding_func(
-                    texts_to_embed, context="query", _priority=5
+                    texts_to_embed, context="query", _priority=DEFAULT_QUERY_PRIORITY
                 )
                 for i, purpose in enumerate(text_purposes):
                     if purpose == "query":
@@ -4533,6 +4721,41 @@ async def _apply_token_truncation(
     }
 
 
+async def _attach_content_headings(
+    chunks: list[dict], text_chunks_db: BaseKVStorage | None
+) -> None:
+    """Backfill the ``content_headings`` field onto chunks in place.
+
+    Vector chunks never carry a ``heading`` field (chunks_vdb does not store it),
+    and the round-robin merge drops the entity/relation headings too. So we look
+    the chunks up by ``chunk_id`` in text_chunks storage and attach the parent
+    heading path. Only chunks that actually have parent headings get the field,
+    so empty paths are omitted from the JSON sent to the LLM.
+
+    Each level is char-capped inside ``format_parent_headings`` and the joined
+    path is token-budgeted against ``DEFAULT_MAX_SECTION_CONTEXT_TOKENS`` here —
+    mirroring the extraction breadcrumb (see ``_truncate_section_context``). The
+    query-context token truncation only keeps/drops whole chunks; it never trims
+    this metadata inside a retained chunk, so a deep heading chain (the per-level
+    cap bounds each level's length, not the number of levels) is bounded here.
+    """
+    if not text_chunks_db or not chunks:
+        return
+    tokenizer = text_chunks_db.global_config.get("tokenizer")
+    chunk_ids = [c.get("chunk_id") for c in chunks]
+    chunk_data_list = await text_chunks_db.get_by_ids(chunk_ids)
+    for chunk, data in zip(chunks, chunk_data_list):
+        if not isinstance(data, dict):
+            continue
+        headings = _truncate_section_context(
+            format_parent_headings(data),
+            tokenizer,
+            DEFAULT_MAX_SECTION_CONTEXT_TOKENS,
+        )
+        if headings:
+            chunk["content_headings"] = headings
+
+
 async def _merge_all_chunks(
     filtered_entities: list[dict],
     filtered_relations: list[dict],
@@ -4631,6 +4854,12 @@ async def _merge_all_chunks(
     logger.info(
         f"Round-robin merged chunks: {origin_len} -> {len(merged_chunks)} (deduplicated {origin_len - len(merged_chunks)})"
     )
+
+    # Backfill heading path before token truncation so it counts toward the budget
+    if text_chunks_db and text_chunks_db.global_config.get(
+        "enable_content_headings", False
+    ):
+        await _attach_content_headings(merged_chunks, text_chunks_db)
 
     return merged_chunks
 
@@ -4739,12 +4968,13 @@ async def _build_context_str(
     # The actual tokens may be slightly less than available_chunk_tokens due to deduplication logic
     chunks_context = []
     for i, chunk in enumerate(truncated_chunks):
-        chunks_context.append(
-            {
-                "reference_id": chunk["reference_id"],
-                "content": chunk["content"],
-            }
-        )
+        entry = {
+            "reference_id": chunk["reference_id"],
+            "content": chunk["content"],
+        }
+        if chunk.get("content_headings"):
+            entry["content_headings"] = chunk["content_headings"]
+        chunks_context.append(entry)
 
     text_units_str = "\n".join(
         json.dumps(text_unit, ensure_ascii=False) for text_unit in chunks_context
@@ -4811,8 +5041,9 @@ async def _build_context_str(
         entity_id_to_original,
         relation_id_to_original,
     )
+    final_data_payload = final_data.get("data", {})
     logger.debug(
-        f"[_build_context_str] Final data after conversion: {len(final_data.get('entities', []))} entities, {len(final_data.get('relationships', []))} relationships, {len(final_data.get('chunks', []))} chunks"
+        f"[_build_context_str] Final data after conversion: {len(final_data_payload.get('entities', []))} entities, {len(final_data_payload.get('relationships', []))} relationships, {len(final_data_payload.get('chunks', []))} chunks"
     )
     return result, final_data
 
@@ -5516,6 +5747,7 @@ async def naive_query(
     global_config: dict[str, str],
     hashing_kv: BaseKVStorage | None = None,
     system_prompt: str | None = None,
+    text_chunks_db: BaseKVStorage | None = None,
     return_raw_data: Literal[True] = True,
 ) -> dict[str, Any]: ...
 
@@ -5528,6 +5760,7 @@ async def naive_query(
     global_config: dict[str, str],
     hashing_kv: BaseKVStorage | None = None,
     system_prompt: str | None = None,
+    text_chunks_db: BaseKVStorage | None = None,
     return_raw_data: Literal[False] = False,
 ) -> str | AsyncIterator[str]: ...
 
@@ -5539,6 +5772,7 @@ async def naive_query(
     global_config: dict[str, str],
     hashing_kv: BaseKVStorage | None = None,
     system_prompt: str | None = None,
+    text_chunks_db: BaseKVStorage | None = None,
 ) -> QueryResult | None:
     """
     Execute naive query and return unified QueryResult object.
@@ -5564,15 +5798,11 @@ async def naive_query(
     if not query:
         return QueryResult(content=PROMPTS["fail_response"])
 
-    if query_param.model_func:
-        use_model_func = query_param.model_func
-    else:
-        use_model_func = global_config.get("retrieval_llm_model_func", global_config["llm_model_func"])
-        # Apply higher priority (5) to query relation LLM function
-        use_model_func = partial(use_model_func, _priority=5)
-    llm_cache_identity = get_llm_cache_identity(
-        global_config, "query", query_param.model_func
+    # Apply higher priority (5) to query relation LLM function
+    use_model_func = partial(
+        global_config["role_llm_funcs"]["query"], _priority=DEFAULT_QUERY_PRIORITY
     )
+    llm_cache_identity = get_llm_cache_identity(global_config, "query")
 
     tokenizer: Tokenizer = global_config["tokenizer"]
     if not tokenizer:
@@ -5586,6 +5816,10 @@ async def naive_query(
             "[naive_query] No relevant document chunks found; returning no-result."
         )
         return None
+
+    # Backfill heading path before token truncation so it counts toward the budget
+    if global_config.get("enable_content_headings", False):
+        await _attach_content_headings(chunks, text_chunks_db)
 
     # Calculate dynamic token limit for chunks
     max_total_tokens = getattr(
@@ -5667,12 +5901,13 @@ async def naive_query(
     # Build chunks_context from processed chunks with reference IDs
     chunks_context = []
     for i, chunk in enumerate(processed_chunks_with_ref_ids):
-        chunks_context.append(
-            {
-                "reference_id": chunk["reference_id"],
-                "content": chunk["content"],
-            }
-        )
+        entry = {
+            "reference_id": chunk["reference_id"],
+            "content": chunk["content"],
+        }
+        if chunk.get("content_headings"):
+            entry["content_headings"] = chunk["content_headings"]
+        chunks_context.append(entry)
 
     text_units_str = "\n".join(
         json.dumps(text_unit, ensure_ascii=False) for text_unit in chunks_context
@@ -5716,6 +5951,7 @@ async def naive_query(
         query_param.max_total_tokens,
         query_param.user_prompt or "",
         query_param.enable_rerank,
+        global_config.get("enable_content_headings", False),
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
     )
@@ -5729,8 +5965,6 @@ async def naive_query(
         )
         response = cached_response
     else:
-        if query_param.model_func:
-            _warn_deprecated_query_model_func("naive query generation")
         response = await use_model_func(
             user_query,
             system_prompt=sys_prompt,
@@ -5750,6 +5984,9 @@ async def naive_query(
                 "max_total_tokens": query_param.max_total_tokens,
                 "user_prompt": query_param.user_prompt or "",
                 "enable_rerank": query_param.enable_rerank,
+                "enable_content_headings": global_config.get(
+                    "enable_content_headings", False
+                ),
             }
             await save_to_cache(
                 hashing_kv,
