@@ -49,6 +49,8 @@ services:
       - WORKING_DIR=/app/data/rag_storage
       - INPUT_DIR=/app/data/inputs
       - PROMPT_DIR=/app/data/prompts
+      # SECURITY: set LIGHTRAG_API_KEY (or AUTH_ACCOUNTS with TOKEN_SECRET) in .env
+      # so the exposed server is authenticated — without it every endpoint is public.
 
     depends_on:
       neo4j:

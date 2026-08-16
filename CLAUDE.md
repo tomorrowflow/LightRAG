@@ -288,6 +288,8 @@ The fork originally vendored `raganything` (a `RAGManager` singleton, a Scheme M
 
 The fork's `retrieval_llm_model_func` / `RETRIEVAL_LLM_MODEL` was superseded by upstream's role-based LLM system (`role_llm_funcs` with `query`/`keyword`/`extract`/`vlm` roles, configured via `QUERY_LLM_*` / `KEYWORD_LLM_*` env vars). `kg_query`, `extract_keywords_only`, and `naive_query` now route through `role_llm_funcs["query"]` / `["keyword"]`. To run a separate model for query-time operations, set `QUERY_LLM_*` / `KEYWORD_LLM_*` instead of `RETRIEVAL_LLM_*`.
 
+A backward-compat shim in `lightrag/api/config.py` still maps any `RETRIEVAL_LLM_BINDING` / `RETRIEVAL_LLM_MODEL` / `RETRIEVAL_LLM_BINDING_HOST` / `RETRIEVAL_LLM_BINDING_API_KEY` onto the `QUERY_` and `KEYWORD_` role vars (only where those aren't set explicitly) and logs a deprecation warning. `docker-compose.yml` still sets `RETRIEVAL_LLM_BINDING_HOST`, which works via this shim — migrate it to `QUERY_LLM_BINDING_HOST` / `KEYWORD_LLM_BINDING_HOST` when convenient.
+
 ### File Lifecycle on Insert
 
 - **`lightrag/lightrag.py`**: New `input_dir` field (env: `INPUT_DIR`, default `./inputs`). After enqueuing, source files are moved from `input_dir` into an `__enqueued__` subdirectory with collision-safe naming.
@@ -296,13 +298,28 @@ The fork's `retrieval_llm_model_func` / `RETRIEVAL_LLM_MODEL` was superseded by 
 
 - **`lightrag/lightrag.py`**: New methods `aclean_parse_cache_by_doc_ids()`, `clean_parse_cache_by_doc_ids()`, `aclean_all_parse_cache()`, `clean_all_parse_cache()` for removing cached parsing results from `kv_store_parse_cache.json`.
 
-### PostgreSQL Conditional pgvector
+### PostgreSQL Conditional pgvector — SUPERSEDED by upstream
 
-- **`lightrag/kg/postgres_impl.py`**: `POSTGRES_ENABLE_VECTOR` env var / config option. When `false`, skips creating the vector extension and `register_vector`. `PGVectorStorage` raises an explicit error if used with vector disabled.
+The fork's `POSTGRES_ENABLE_VECTOR` env var is gone. Upstream now derives pgvector
+usage from the configured backend (`enable_vector = vector_storage == "PGVectorStorage"`),
+so an unspecified vector backend no longer demands the extension. There is deliberately
+no `None -> True` default. To run PostgreSQL without pgvector, simply use a non-PG
+vector storage; `PGVectorStorage.initialize` requests the extension itself.
+
+### PostgreSQL Parse-Cache Namespace
+
+- **`lightrag/kg/postgres_impl.py`**: `PGKVStorage` supports the `KV_STORE_PARSE_CACHE`
+  namespace (`LIGHTRAG_PARSE_CACHE` table, `get_by_id`/`get_by_ids`/`upsert_parse_cache`
+  templates), so the parse cache works on PostgreSQL and not just the JSON backend.
 
 ### Bug Fixes (vs. upstream)
 
-- **Entity merge preserves existing data** (`operate.py`): `merge_nodes_and_edges` now fetches existing entities/relations before merging, preventing data loss on re-processing.
+- **Entity merge data loss** (`operate.py`): SUPERSEDED. Upstream's issue #3400 rework
+  moved the `full_entities` / `full_relations` writes into "Phase 0" — a write-ahead
+  recovery anchor persisted from the full candidate superset *before* any graph
+  mutation. The fork's post-merge "Phase 3" read-merge-write was removed as part of
+  adopting that; re-adding it would reintroduce the post-mutation write that upstream
+  deliberately deleted.
 - **Chinese space removal guard** (`utils.py`): The Chinese-specific space-stripping regex in `normalize_extracted_info` is now conditional on detecting Chinese characters, preventing mangling of English text like "AI Framework".
 - **Ollama embedding robustness** (`llm/ollama.py`): Empty/whitespace texts replaced with placeholder, NaN embeddings replaced with zeros, retry decorator added to `ollama_embed()`.
 - **Ollama retry policy**: Increased from 3 to 5 attempts, max wait from 10s to 60s, added `ResponseError` to retryable exceptions.
@@ -310,8 +327,8 @@ The fork's `retrieval_llm_model_func` / `RETRIEVAL_LLM_MODEL` was superseded by 
 
 ### Docker / Deployment
 
-- **Dockerfile**: Copies local `RAG-Anything/` into the build, installs system deps for MinerU/OpenCV (`libgl1`, `libglib2.0-0`, X11 libs).
-- **`docker-compose.yaml`**: Multi-service architecture with PostgreSQL, Neo4j, and vLLM reranker services. Separate vision model host configuration.
+- **Dockerfile**: Installs system deps for MinerU/OpenCV (`libgl1`, `libglib2.0-0`, X11 libs). The `RAG-Anything/` COPY is gone. Uses upstream's `docker-entrypoint.sh` ENTRYPOINT, which chowns the data dirs (honouring `WORKING_DIR`/`INPUT_DIR`/`PROMPT_DIR`) and drops to the non-root `lightrag` user via gosu — so the fork no longer overrides CMD with explicit `--working-dir`/`--input-dir` flags; compose sets those as env vars instead.
+- **`docker-compose.yml`**: Multi-service architecture with PostgreSQL, Neo4j, Qdrant, Redis, Memgraph, MongoDB, and vLLM reranker services. Separate vision model host configuration. Kept wholesale over upstream's single-service template.
 - **`lightrag/utils.py`**: `.env` path hardcoded to `/app/.env` for Docker convention. **Note**: This may need adjustment for non-Docker development.
 
 ### Build / Dependency Changes
@@ -361,3 +378,5 @@ The fork's `retrieval_llm_model_func` / `RETRIEVAL_LLM_MODEL` was superseded by 
 ## AGENTS.md
 
 Also follow the repository rules in [./AGENTS.md](./AGENTS.md).
+
+@AGENTS.md

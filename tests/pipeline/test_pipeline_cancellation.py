@@ -34,8 +34,14 @@ import pytest
 from lightrag import LightRAG, ROLES, RoleLLMConfig
 from lightrag.base import DocProcessingStatus, DocStatus
 from lightrag.exceptions import MultimodalAnalysisError, PipelineCancelledException
-from lightrag.kg.shared_storage import get_namespace_data, get_namespace_lock
+from lightrag.kg.shared_storage import (
+    get_namespace_data,
+    get_namespace_lock,
+    get_pipeline_ingress,
+)
 from lightrag.pipeline import _BatchRunContext
+from lightrag.parser.exceptions import ParsePipelineCancelled
+from lightrag.parser.llm_bridge import SyncLLMBridge
 from lightrag.parser.registry import parser_specs_snapshot
 from lightrag.utils import EmbeddingFunc, Tokenizer
 
@@ -238,6 +244,87 @@ async def test_parse_worker_drains_queue_when_cancelled_before_start(
 
 
 @pytest.mark.asyncio
+async def test_pipeline_cancel_interrupts_inflight_native_parser_llm(
+    tmp_path, monkeypatch
+):
+    """The batch watcher must unblock a native parser waiting on an LLM."""
+    rag = _build_rag(tmp_path)
+    await rag.initialize_storages()
+    try:
+        _ctx, pipeline_status, pipeline_status_lock = await _make_ctx(rag)
+        doc_id = "doc-inflight-smart-heading"
+        status_doc = _make_status_doc(doc_id)
+        await rag.full_docs.upsert(
+            {
+                doc_id: {
+                    "content": "source",
+                    "file_path": status_doc.file_path,
+                }
+            }
+        )
+        await rag.doc_status.upsert(
+            {
+                doc_id: {
+                    "status": DocStatus.PENDING.value,
+                    "content_summary": status_doc.content_summary,
+                    "content_length": status_doc.content_length,
+                    "file_path": status_doc.file_path,
+                    "created_at": status_doc.created_at,
+                    "updated_at": status_doc.updated_at,
+                    "track_id": "t",
+                }
+            }
+        )
+
+        submit_started = asyncio.Event()
+
+        class _BlockingNativeParser:
+            async def parse(self, parse_ctx):
+                loop = asyncio.get_running_loop()
+
+                async def _submit(_prompt, **_kwargs):
+                    submit_started.set()
+                    await asyncio.Future()
+
+                bridge = SyncLLMBridge(
+                    loop,
+                    _submit,
+                    cancel_events=(
+                        (
+                            parse_ctx.pipeline_cancel_event,
+                            ParsePipelineCancelled,
+                        ),
+                    ),
+                    poll_interval=0.02,
+                )
+                await asyncio.to_thread(bridge, "title block prompt")
+                raise AssertionError("bridge cancellation should interrupt parse")
+
+        monkeypatch.setattr(
+            "lightrag.pipeline.get_parser", lambda *_a, **_k: _BlockingNativeParser()
+        )
+        batch = asyncio.create_task(
+            rag._run_pipeline_batch(
+                {doc_id: status_doc},
+                pipeline_status=pipeline_status,
+                pipeline_status_lock=pipeline_status_lock,
+                ingress=await get_pipeline_ingress(rag.workspace),
+            )
+        )
+        await asyncio.wait_for(submit_started.wait(), timeout=1.0)
+        async with pipeline_status_lock:
+            pipeline_status["cancellation_requested"] = True
+
+        await asyncio.wait_for(batch, timeout=2.0)
+        row = await rag.doc_status.get_by_id(doc_id)
+        assert row is not None
+        assert row["status"] == DocStatus.FAILED.value
+        assert "User cancelled during parse" in (row.get("error_msg") or "")
+    finally:
+        await rag.finalize_storages()
+
+
+@pytest.mark.asyncio
 async def test_analyze_worker_drains_queue_when_cancelled_before_start(tmp_path):
     """ANALYZE-worker symmetric to the PARSE test above."""
     rag = _build_rag(tmp_path)
@@ -333,7 +420,12 @@ async def test_analyze_multimodal_inflight_cancellation_polls_flag(
     (≤ 0.5s), cancel pending tasks, write the sidecar with partial
     results, and raise PipelineCancelledException."""
 
+    # Signals that a VLM call has actually started, i.e. analyze_multimodal
+    # is past its pre-schedule cancellation check and the item tasks exist.
+    vlm_inflight = asyncio.Event()
+
     async def slow_vlm(prompt, **kwargs):
+        vlm_inflight.set()
         # 1.2s is short enough that even when the priority-queue worker
         # finishes the in-flight call after we've already raised (the
         # role wrapper does not propagate outer-future cancellation to
@@ -398,14 +490,26 @@ async def test_analyze_multimodal_inflight_cancellation_polls_flag(
         }
         pipeline_status_lock = asyncio.Lock()
 
-        async def flip_after(delay: float):
-            await asyncio.sleep(delay)
+        # Flip the flag off the first VLM call rather than off a wall-clock
+        # delay. analyze_multimodal re-checks cancellation immediately BEFORE
+        # spawning the item tasks, so a flag already set by then raises on
+        # that pre-schedule path: no task ever runs and the sidecar is never
+        # rewritten, which is a different code path than the in-flight one
+        # this test covers. A fixed delay only wins that race on an idle
+        # machine — on a loaded CI runner the startup work outlasts it and
+        # the test fails on the missing llm_analyze_result entries. Gating on
+        # vlm_inflight makes "flag set while tasks are running" an ordering
+        # guarantee instead of a timing bet.
+        flipped_at: list[float] = []
+
+        async def flip_when_inflight():
+            await vlm_inflight.wait()
             async with pipeline_status_lock:
                 pipeline_status["cancellation_requested"] = True
+                flipped_at.append(time.monotonic())
 
-        flipper = asyncio.create_task(flip_after(0.1))
+        flipper = asyncio.create_task(flip_when_inflight())
 
-        start = time.monotonic()
         with pytest.raises(PipelineCancelledException):
             await asyncio.wait_for(
                 rag.analyze_multimodal(
@@ -418,11 +522,25 @@ async def test_analyze_multimodal_inflight_cancellation_polls_flag(
                 ),
                 timeout=15.0,
             )
-        elapsed = time.monotonic() - start
-        await flipper
+        raised_at = time.monotonic()
+        # Never plain-await the flipper: if analyze_multimodal raised without
+        # ever reaching the VLM, vlm_inflight stays clear and the wait would
+        # hang the suite instead of failing the assertions below.
+        flipper.cancel()
+        await asyncio.gather(flipper, return_exceptions=True)
 
-        # Must cancel well before the 1.2s sleep — poll interval is 0.5s.
-        assert elapsed < 1.0, f"in-flight cancel took {elapsed:.2f}s (>1.0s)"
+        # A raise with the flag never set means the pre-schedule check (or an
+        # earlier boundary) fired instead — not the in-flight path under test.
+        assert flipped_at, "cancellation was never requested while VLM ran"
+
+        # Measure from the flag flip, not from the call: only the poll loop's
+        # reaction time is under test, and timing the whole call would fold in
+        # storage/parser startup and re-introduce a load-sensitive threshold.
+        detect_latency = raised_at - flipped_at[0]
+        assert detect_latency < 1.0, (
+            f"poll loop took {detect_latency:.2f}s to observe the flag (>1.0s); "
+            f"the interval is 0.5s and the VLM call is 1.2s"
+        )
 
         payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
         # Sidecar should have been written even though we raised — every

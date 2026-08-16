@@ -16,6 +16,7 @@ import json
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -48,6 +49,22 @@ class _FakeResponse:
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code}")
+
+    async def aiter_bytes(self):
+        yield self.content
+
+
+class _FakeStreamContext:
+    """Async context manager mirroring ``httpx.AsyncClient.stream()``."""
+
+    def __init__(self, response: _FakeResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _FakeResponse:
+        return self._response
+
+    async def __aexit__(self, *_: Any) -> None:
+        pass
 
 
 class _FakeAsyncClient:
@@ -100,6 +117,14 @@ class _FakeAsyncClient:
     ) -> _FakeResponse:
         self.gets.append(url)
         return _CURRENT.dispatcher.get(url, params=params, headers=headers)
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> _FakeStreamContext:
+        assert method == "GET", f"unexpected stream method {method}"
+        # Delegates to the same dispatcher.get() every existing test fixture
+        # already implements, rather than requiring every _Dispatcher
+        # subclass to separately implement streaming.
+        self.gets.append(url)
+        return _FakeStreamContext(_CURRENT.dispatcher.get(url, **kwargs))
 
 
 class _Dispatcher:
@@ -923,3 +948,210 @@ async def test_client_official_polls_through_non_terminal_states(
     await MinerURawClient().download_into(raw, src)
     assert dispatcher.polls == 3
     assert (raw / "content_list.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Security: service-returned ids are encoded into a single URL path segment
+# (CWE-116). A crafted batch_id / task_id must not break out of the intended
+# path or append a query string to the poll/result request.
+# ---------------------------------------------------------------------------
+
+
+class _OfficialInjectionDispatcher(_Dispatcher):
+    BATCH_ID = "../batch?x=1"
+
+    def __init__(self) -> None:
+        self.seen_get_urls: list[str] = []
+
+    def post(self, url: str, **_: Any) -> _FakeResponse:
+        if url == "https://mineru.net/api/v4/file-urls/batch":
+            return _FakeResponse(
+                text=json.dumps(
+                    {
+                        "code": 0,
+                        "msg": "ok",
+                        "data": {
+                            "batch_id": self.BATCH_ID,
+                            "file_urls": ["https://upload.example/demo.pdf"],
+                        },
+                    }
+                )
+            )
+        raise AssertionError(f"unexpected POST {url}")
+
+    def put(self, url: str, **_: Any) -> _FakeResponse:
+        if url == "https://upload.example/demo.pdf":
+            return _FakeResponse(status_code=200)
+        raise AssertionError(f"unexpected PUT {url}")
+
+    def get(self, url: str, **_: Any) -> _FakeResponse:
+        self.seen_get_urls.append(url)
+        encoded = quote(self.BATCH_ID, safe="")
+        if url == f"https://mineru.net/api/v4/extract-results/batch/{encoded}":
+            return _FakeResponse(
+                text=json.dumps(
+                    {
+                        "code": 0,
+                        "data": {
+                            "extract_result": [
+                                {
+                                    "file_name": "demo.pdf",
+                                    "state": "done",
+                                    "full_zip_url": "https://download.example/full.zip",
+                                }
+                            ]
+                        },
+                    }
+                )
+            )
+        if url == "https://download.example/full.zip":
+            return _FakeResponse(
+                content=_nested_mineru_zip(),
+                headers={"Content-Type": "application/zip"},
+            )
+        raise AssertionError(f"unexpected GET {url}")
+
+
+@pytest.mark.offline
+async def test_client_official_encodes_batch_id_into_url_path_segment(
+    tmp_path: Path,
+    fake_httpx: type,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MINERU_API_MODE", "official")
+    monkeypatch.setenv("MINERU_API_TOKEN", "token-123")
+    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MINERU_MAX_POLLS", "5")
+
+    src = tmp_path / "demo.pdf"
+    src.write_bytes(b"PDFBYTES" * 200)
+    raw = tmp_path / "demo.mineru_raw"
+    raw.mkdir()
+
+    dispatcher = _OfficialInjectionDispatcher()
+    _CURRENT.dispatcher = dispatcher
+    manifest = await MinerURawClient().download_into(raw, src)
+
+    poll_urls = [u for u in dispatcher.seen_get_urls if "extract-results" in u]
+    assert poll_urls
+    for url in poll_urls:
+        assert "..%2Fbatch%3Fx%3D1" in url
+        assert "?" not in url
+    # The manifest preserves the real, unencoded id for downstream attribution.
+    assert manifest.task_id == _OfficialInjectionDispatcher.BATCH_ID
+
+
+class _LocalInjectionDispatcher(_Dispatcher):
+    TASK_ID = "../admin?x=1"
+
+    def __init__(self) -> None:
+        self.seen_get_urls: list[str] = []
+
+    def post(self, url: str, **_: Any) -> _FakeResponse:
+        if url == "http://127.0.0.1:8000/tasks":
+            return _FakeResponse(text=json.dumps({"task_id": self.TASK_ID}))
+        raise AssertionError(f"unexpected POST {url}")
+
+    def get(self, url: str, **_: Any) -> _FakeResponse:
+        self.seen_get_urls.append(url)
+        encoded = quote(self.TASK_ID, safe="")
+        if url == f"http://127.0.0.1:8000/tasks/{encoded}":
+            return _FakeResponse(
+                text=json.dumps({"task_id": self.TASK_ID, "status": "completed"})
+            )
+        if url == f"http://127.0.0.1:8000/tasks/{encoded}/result":
+            return _FakeResponse(
+                content=_nested_mineru_zip(),
+                headers={"Content-Type": "application/zip"},
+            )
+        raise AssertionError(f"unexpected GET {url}")
+
+
+@pytest.mark.offline
+async def test_client_local_encodes_task_id_into_url_path_segments(
+    tmp_path: Path,
+    fake_httpx: type,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MINERU_API_MODE", "local")
+    monkeypatch.setenv("MINERU_LOCAL_ENDPOINT", "http://127.0.0.1:8000")
+    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+
+    src = tmp_path / "demo.pdf"
+    src.write_bytes(b"PDFBYTES" * 200)
+    raw = tmp_path / "demo.mineru_raw"
+    raw.mkdir()
+
+    dispatcher = _LocalInjectionDispatcher()
+    _CURRENT.dispatcher = dispatcher
+    manifest = await MinerURawClient().download_into(raw, src)
+
+    # Both the poll URL and the result URL must carry the encoded segment.
+    assert dispatcher.seen_get_urls
+    for url in dispatcher.seen_get_urls:
+        assert "..%2Fadmin%3Fx%3D1" in url
+        assert "?" not in url
+        assert "/admin" not in url
+    assert manifest.task_id == _LocalInjectionDispatcher.TASK_ID
+
+
+@pytest.mark.offline
+async def test_client_local_result_bundle_entry_budget_is_enforced(
+    tmp_path: Path,
+    fake_httpx: type,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MinerU's result bundle must go through the shared zip-bomb budget.
+
+    _download_zip previously hand-rolled ZipFile.extractall with only a
+    path-traversal check, so a compromised/misbehaving endpoint (the default
+    MINERU_ENDPOINT is the remote mineru.net API) could expand a bundle
+    unbounded onto disk. It now routes through safe_extract_zip with the
+    result_bundle_limits() budget; a low PARSER_RESULT_BUNDLE_MAX_ENTRIES
+    trips before anything is written.
+    """
+    monkeypatch.setenv("MINERU_API_MODE", "local")
+    monkeypatch.setenv("MINERU_LOCAL_ENDPOINT", "http://127.0.0.1:8000")
+    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("PARSER_RESULT_BUNDLE_MAX_ENTRIES", "1")  # flat zip has 2
+
+    src = tmp_path / "demo.pdf"
+    src.write_bytes(b"PDF" * 50)
+    raw = tmp_path / "demo.mineru_raw"
+    raw.mkdir()
+
+    _CURRENT.dispatcher = _LocalFlatZipDispatcher()
+    with pytest.raises(RuntimeError, match="entries"):
+        await MinerURawClient().download_into(raw, src)
+
+    # Nothing from the bundle was extracted.
+    assert not (raw / "content_list.json").exists()
+
+
+@pytest.mark.offline
+async def test_client_local_result_bundle_byte_budget_is_enforced(
+    tmp_path: Path,
+    fake_httpx: type,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The uncompressed-size gate is live-read too."""
+    monkeypatch.setenv("MINERU_API_MODE", "local")
+    monkeypatch.setenv("MINERU_LOCAL_ENDPOINT", "http://127.0.0.1:8000")
+    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv(
+        "PARSER_RESULT_BUNDLE_MAX_TOTAL_BYTES", "1"
+    )  # any real zip trips
+
+    src = tmp_path / "demo.pdf"
+    src.write_bytes(b"PDF" * 50)
+    raw = tmp_path / "demo.mineru_raw"
+    raw.mkdir()
+
+    _CURRENT.dispatcher = _LocalFlatZipDispatcher()
+    # stream_capped_get has its own separate PARSER_RESULT_BUNDLE_DOWNLOAD_MAX_BYTES
+    # budget (unset here, so it stays at its generous default) and does not
+    # consult this uncompressed-size cap -- only safe_extract_zip's
+    # declared-size check below sees it.
+    with pytest.raises(RuntimeError, match="uncompressed size"):
+        await MinerURawClient().download_into(raw, src)
+    assert not (raw / "content_list.json").exists()
