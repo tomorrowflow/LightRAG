@@ -36,24 +36,6 @@ DEFAULT_SUMMARY_LENGTH_RECOMMENDED = 600
 DEFAULT_SUMMARY_CONTEXT_SIZE = 12000
 # Maximum token size allowed for entity extraction input context
 DEFAULT_MAX_EXTRACT_INPUT_TOKENS = 20480
-# Default entities to extract if ENTITY_TYPES is not specified in .env
-DEFAULT_ENTITY_TYPES = [
-    "Person",
-    "Creature",
-    "Organization",
-    "Location",
-    "Event",
-    "Concept",
-    "Method",
-    "Content",
-    "Data",
-    "Artifact",
-    "NaturalObject",
-]
-
-# Default relationship types to prioritize during extraction (empty = no preference)
-DEFAULT_RELATIONSHIP_TYPES: list[str] = []
-
 
 # Maximum token size for the per-chunk `---Section Context---` heading
 # breadcrumb injected into the extraction prompt. Keeps section metadata from

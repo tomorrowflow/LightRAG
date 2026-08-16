@@ -68,8 +68,6 @@ from lightrag.constants import (
     DEFAULT_MAX_GRAPH_NODES,
     DEFAULT_MAX_SOURCE_IDS_PER_ENTITY,
     DEFAULT_MAX_SOURCE_IDS_PER_RELATION,
-    DEFAULT_ENTITY_TYPES,
-    DEFAULT_RELATIONSHIP_TYPES,
     DEFAULT_SUMMARY_LANGUAGE,
     DEFAULT_LLM_TIMEOUT,
     DEFAULT_EMBEDDING_TIMEOUT,
@@ -520,15 +518,6 @@ def _enforce_chunk_token_limit_before_embedding(
     for idx, item in enumerate(normalized):
         item["chunk_order_index"] = idx
     return normalized
-
-
-def _default_addon_params() -> dict[str, Any]:
-    return {
-        "language": get_env_value("SUMMARY_LANGUAGE", DEFAULT_SUMMARY_LANGUAGE, str),
-        "entity_type_prompt_file": get_env_value("ENTITY_TYPE_PROMPT_FILE", "", str),
-        "entity_types": get_env_value("ENTITY_TYPES", DEFAULT_ENTITY_TYPES, list),
-        "relationship_types": get_env_value("RELATIONSHIP_TYPES", DEFAULT_RELATIONSHIP_TYPES, list),
-    }
 
 
 @final

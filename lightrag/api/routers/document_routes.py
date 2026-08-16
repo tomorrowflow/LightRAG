@@ -2785,10 +2785,13 @@ async def pipeline_index_texts(
         "input": texts,
         "file_paths": normalized_file_sources,
         "track_id": track_id,
-        "ids": ids,
         "process_options": process_options,
         "chunk_options": chunk_options,
     }
+    if ids is not None:
+        # Fork feature: explicit document IDs. Only forwarded when the caller
+        # supplied them, so the default path keeps upstream's call shape.
+        enqueue_kwargs["ids"] = ids
     if admission_token is not None:
         # See pipeline_enqueue_file: only forwarded when a reservation exists.
         enqueue_kwargs["admission_token"] = admission_token
@@ -6007,38 +6010,29 @@ def create_document_routes(
             # Clean all parse_cache entries after successful storage drops
             if storage_success_count > 0:
                 try:
-                    if "history_messages" in pipeline_status:
-                        pipeline_status["history_messages"].append(
-                            "Cleaning parse_cache entries"
-                        )
+                    append_pipeline_history(
+                        pipeline_status, "Cleaning parse_cache entries"
+                    )
 
                     parse_cache_result = await rag.aclean_all_parse_cache()
                     if parse_cache_result.get("error"):
                         cache_error_msg = f"Warning: Failed to clean parse_cache: {parse_cache_result['error']}"
                         logger.warning(cache_error_msg)
-                        if "history_messages" in pipeline_status:
-                            pipeline_status["history_messages"].append(cache_error_msg)
+                        append_pipeline_history(pipeline_status, cache_error_msg)
                     else:
                         deleted_count = parse_cache_result.get("deleted_count", 0)
                         if deleted_count > 0:
                             cache_success_msg = f"Successfully cleaned {deleted_count} parse_cache entries"
                             logger.info(cache_success_msg)
-                            if "history_messages" in pipeline_status:
-                                pipeline_status["history_messages"].append(
-                                    cache_success_msg
-                                )
+                            append_pipeline_history(pipeline_status, cache_success_msg)
                         else:
                             cache_empty_msg = "No parse_cache entries to clean"
                             logger.info(cache_empty_msg)
-                            if "history_messages" in pipeline_status:
-                                pipeline_status["history_messages"].append(
-                                    cache_empty_msg
-                                )
+                            append_pipeline_history(pipeline_status, cache_empty_msg)
                 except Exception as cache_error:
                     cache_error_msg = f"Warning: Exception while cleaning parse_cache: {str(cache_error)}"
                     logger.warning(cache_error_msg)
-                    if "history_messages" in pipeline_status:
-                        pipeline_status["history_messages"].append(cache_error_msg)
+                    append_pipeline_history(pipeline_status, cache_error_msg)
 
             # If all storage operations failed, return error status and don't proceed with file deletion
             if storage_success_count == 0 and storage_error_count > 0:
