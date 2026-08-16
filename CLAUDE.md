@@ -92,6 +92,16 @@ Environment variable overrides: `LIGHTRAG_RUN_INTEGRATION`, `LIGHTRAG_KEEP_ARTIF
 
 Test markers: `offline`, `integration`, `requires_db`, `requires_api`.
 
+**Gotcha — a local `.env` poisons the config tests.** `load_dotenv` reads `.env`
+from the working directory, so running `pytest` in a checkout that has a real
+`.env` leaks your bindings into tests that assert on binding/role resolution.
+With this fork's `.env` (`RETRIEVAL_LLM_BINDING=ollama`, `KEYWORD_LLM_BINDING=ollama`)
+that produces ~11 spurious failures in `tests/api/config/` — mostly
+`SystemExit: Cross-provider error for role ...` — plus one in
+`test_ollama_think_startup_validation.py`. They are not real breakage. Run the
+suite from a clean worktree (`git worktree add <dir> <branch>`; untracked `.env`
+is not copied) to get a trustworthy result.
+
 ### Linting
 ```bash
 ruff check .
@@ -297,6 +307,36 @@ A backward-compat shim in `lightrag/api/config.py` still maps any `RETRIEVAL_LLM
 ### Parse Cache Cleanup
 
 - **`lightrag/lightrag.py`**: New methods `aclean_parse_cache_by_doc_ids()`, `clean_parse_cache_by_doc_ids()`, `aclean_all_parse_cache()`, `clean_all_parse_cache()` for removing cached parsing results from `kv_store_parse_cache.json`.
+
+### Explicit Document IDs on Text Insert
+
+- **`lightrag/api/routers/document_routes.py`**: `/documents/text` accepts `id` and
+  `/documents/texts` accepts `ids`, forwarded through `pipeline_index_texts` to
+  `apipeline_enqueue_documents`. Forwarded **only when supplied** — passing
+  `ids=None` unconditionally changes the call shape and breaks upstream test
+  doubles that don't declare the parameter. Upstream treats a provided `ids` as
+  the SDK raw direct-insert path (always enqueued RAW, never `pending_parse`),
+  which is the correct semantics for these text endpoints.
+
+### RELATIONSHIP_TYPES — REMOVED (was inert, superseded)
+
+The fork's `RELATIONSHIP_TYPES` / `DEFAULT_RELATIONSHIP_TYPES` "soft-priority
+relationship keywords" param was removed during the v1.5.7 merge. It only ever
+registered an addon-param key that no extraction code read, and upstream has
+since replaced the list-based `entity_types` addon param with a free-text
+`entity_types_guidance` string (`lightrag/addon_params.py`, `lightrag/prompt.py`).
+The fork's `_default_addon_params()` helper was dead code by then and its
+`DEFAULT_ENTITY_TYPES` constant broke an upstream invariant test. To steer
+relationship extraction now, set `addon_params["entity_types_guidance"]` or
+override the prompt template. `env.example` still documents the old
+`RELATIONSHIP_TYPES` line — it has no effect.
+
+### Pipeline Status History (upstream contract)
+
+All writes to `pipeline_status["history_messages"]` must go through
+`append_pipeline_history` from `lightrag.kg.shared_storage` (LR2 §10.3) — a
+repo-wide test fails if a raw `.append(...)` reappears. The helper is
+never-raising and skips a missing/None `history_messages`, so no guard is needed.
 
 ### PostgreSQL Conditional pgvector — SUPERSEDED by upstream
 
