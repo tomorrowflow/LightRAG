@@ -102,6 +102,25 @@ that produces ~11 spurious failures in `tests/api/config/` — mostly
 suite from a clean worktree (`git worktree add <dir> <branch>`; untracked `.env`
 is not copied) to get a trustworthy result.
 
+**Known-expected failures (not regressions).** Measured against a pristine
+`upstream/main` worktree, so they are upstream's own or a deliberate fork
+divergence:
+
+- `tests/api/test_path_prefixes.py` (4), `tests/api/test_ui_customization.py` (1),
+  `tests/parser/markdown/test_raw_cache.py`,
+  `tests/pipeline/test_chunk_options_regex_scrub.py`,
+  `tests/pipeline/test_strict_capability_gate.py` — all 8 fail on unmodified
+  upstream too.
+- `tests/setup/test_env.py::test_env_storage_flow_uses_host_defaults_for_empty_postgres_docker_credentials`
+  — fork-specific and expected: the setup wizard treats `docker-compose.yml` as a
+  template and asserts literal values (`POSTGRES_USER: "rag"`), but the fork keeps
+  its own compose with `${VAR:-default}` substitution. **Consequence: don't run
+  `make env-*` — the wizard would rewrite the fork's compose.**
+
+Some suites need optional deps that are not in the `test` extra; without them
+pytest aborts the whole run at collection: `pip install redis opensearch-py
+llama-index-core llama-index-llms-openai llama-index-embeddings-openai`.
+
 ### Linting
 ```bash
 ruff check .
@@ -288,6 +307,27 @@ Each LightRAG instance can use a `workspace` parameter for data isolation. Imple
 
 ## Fork-Specific Changes
 
+### Secrets in history: do NOT purge with git-filter-repo
+
+`.env.running` (17 real credentials) was committed and pushed long ago. It is now
+untracked and gitignored, but it remains in history and on the GitHub remote.
+
+**Purging it rewrites the fork out of upstream's history.** Upstream's
+"Merge pull request #NNNN" commits are GPG-signed by GitHub, and `git fast-export`
+— which `git-filter-repo` is built on — drops signatures. Every signed commit
+therefore gets a new SHA and the change cascades to all descendants, so the
+upstream commits *inside* our history stop matching real upstream. A first attempt
+moved the merge base from our last merge point back to **2024-12-09** and turned a
+clean 845-commit merge into a 10152/9105 divergence. Disabling
+`--prune-empty` / `--prune-degenerate` does **not** help — the signatures are the
+cause. That attempt was never pushed; it is parked on the local branch
+`filter-repo-attempt-20260816`.
+
+Purging also would not un-leak anything: the credentials have been public on
+GitHub for months, and GitHub keeps unreachable blobs reachable by SHA until
+Support runs GC. **Rotate the credentials instead** — that is the only real
+remediation.
+
 This fork (`tomorrowflow/LightRAG`) diverges from upstream (`HKUDS/LightRAG`) in the following ways:
 
 ### RAGAnything / Multimodal — REMOVED (now upstream-native)
@@ -303,6 +343,14 @@ A backward-compat shim in `lightrag/api/config.py` still maps any `RETRIEVAL_LLM
 ### File Lifecycle on Insert
 
 - **`lightrag/lightrag.py`**: New `input_dir` field (env: `INPUT_DIR`, default `./inputs`). After enqueuing, source files are moved from `input_dir` into an `__enqueued__` subdirectory with collision-safe naming.
+
+> **`input_dir` must stay at the END of the `LightRAG` dataclass.** `LightRAG`
+> is a plain dataclass without `kw_only`, so field order is public API — a field
+> inserted mid-class silently rebinds every positional argument after it.
+> `input_dir` originally sat between `doc_status_storage` and `workspace`, taking
+> index 5 and shifting all 69 parameters after it; upstream's
+> `tests/test_dataclass_positional_compatibility.py` now pins that order and
+> caught it. Any future fork field goes at the end too.
 
 ### Parse Cache Cleanup
 
@@ -370,6 +418,29 @@ vector storage; `PGVectorStorage.initialize` requests the extension itself.
 - **Dockerfile**: Installs system deps for MinerU/OpenCV (`libgl1`, `libglib2.0-0`, X11 libs). The `RAG-Anything/` COPY is gone. Uses upstream's `docker-entrypoint.sh` ENTRYPOINT, which chowns the data dirs (honouring `WORKING_DIR`/`INPUT_DIR`/`PROMPT_DIR`) and drops to the non-root `lightrag` user via gosu — so the fork no longer overrides CMD with explicit `--working-dir`/`--input-dir` flags; compose sets those as env vars instead.
 - **`docker-compose.yml`**: Multi-service architecture with PostgreSQL, Neo4j, Qdrant, Redis, Memgraph, MongoDB, and vLLM reranker services. Separate vision model host configuration. Kept wholesale over upstream's single-service template.
 - **`lightrag/utils.py`**: `.env` path hardcoded to `/app/.env` for Docker convention. **Note**: This may need adjustment for non-Docker development.
+- **User-defined UI bundle**: upstream's opt-in `UI_TEMPLATES_DIR` feature is wired
+  into the fork's compose (read-only `./data/ui_templates` mount). Inert until that
+  directory holds a bundle with a `manifest.json`; once one is there, an invalid
+  bundle makes the server refuse to start. See `docs/UserDefinedUI.md`.
+
+### WebUI Build Output Is Not Tracked
+
+`lightrag/api/webui/` is generated and gitignored (matching upstream, which tracks
+nothing there). The fork used to track 49 orphaned asset files with no `index.html`;
+they were removed because they could not serve the UI anyway and went stale on every
+merge — most visibly when upstream added the dual-entry WebUI and the server began
+logging `workspace.html is missing from the WebUI build directory`.
+
+Build it from source: the Dockerfile's `frontend-builder` stage does this for
+container deployments; a direct `lightrag-server` run needs
+
+```bash
+cd lightrag_webui && bun install --frozen-lockfile && bun run build
+```
+
+`vite build` does **not** typecheck. Run `bunx tsc --noEmit` (e.g. in an `oven/bun:1`
+container) before trusting a build — that is what caught the fork's
+`DocumentManager.tsx` referencing upstream's removed `docs` state.
 
 ### Build / Dependency Changes
 
