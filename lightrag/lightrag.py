@@ -827,9 +827,6 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
     doc_status_storage: str = field(default="JsonDocStatusStorage")
     """Storage type for tracking document processing statuses."""
 
-    input_dir: str = field(default_factory=lambda: os.getenv("INPUT_DIR", "./inputs"))
-    """Directory containing input documents"""
-
     # Workspace
     # ---
 
@@ -1464,6 +1461,18 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
     order is public API, and a field inserted mid-class silently rebinds every
     positional argument after it. Placing it next to its logical neighbour
     shifted 43 of them. See ``tests/test_dataclass_positional_compatibility.py``.
+    """
+
+    input_dir: str = field(default_factory=lambda: os.getenv("INPUT_DIR", "./inputs"))
+    """Directory containing input documents (fork feature; env: ``INPUT_DIR``).
+
+    After ``ainsert`` enqueues a document, a source file living under this
+    directory is moved into an ``__enqueued__`` subdirectory.
+
+    Declared LAST for the reason given above: this is a plain dataclass without
+    ``kw_only``, so field order is public API. This field previously sat between
+    ``doc_status_storage`` and ``workspace``, which rebound every positional
+    argument after index 5.
     """
 
     def _mark_addon_params_dirty(self) -> None:
