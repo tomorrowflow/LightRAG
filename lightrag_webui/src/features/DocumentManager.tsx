@@ -711,7 +711,9 @@ export default function DocumentManager() {
 
   // Add tooltip position adjustment for fixed positioning
   useEffect(() => {
-    if (!docs) return;
+    // Upstream replaced the legacy `docs` (DocsStatusesResponse) state with the
+    // paginated `currentPageDocs`; this effect only needs "a list is rendered".
+    if (currentPageDocs.length === 0) return;
 
     // Function to position tooltips
     const positionTooltips = () => {
@@ -769,7 +771,7 @@ export default function DocumentManager() {
       document.removeEventListener('mouseover', handleMouseOver);
       document.removeEventListener('mouseout', handleMouseOut);
     };
-  }, [docs]);
+  }, [currentPageDocs]);
 
   const buildQuerySnapshot = useCallback((
     overrides: Partial<QuerySnapshot> = {}
