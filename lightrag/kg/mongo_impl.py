@@ -98,6 +98,16 @@ _DUPLICATE_KEY_CODE = 11000
 # migration's progress cadence).
 _EDGE_MIGRATION_PROGRESS_INTERVAL = 50_000
 
+# Ceiling on how many same-depth candidates get a degree lookup before the
+# max_nodes cap in the bidirectional BFS. node_degrees_batch binds the whole
+# list into two `$in` arrays, and one hub can put 100k neighbours in a single
+# level -- an array that size inflates the command document and forces the
+# planner through a huge index-bounds list for a ranking that only decides the
+# order of candidates max_nodes will mostly discard anyway. (Deliberately not
+# shared with the OpenSearch constant of the same value: that one is derived
+# from index.max_terms_count / search.max_buckets, this one from $in size.)
+_GRAPH_DEGREE_RANK_MAX_CANDIDATES = 8192
+
 
 def _canonical_edge_endpoints(
     source_node_id: str, target_node_id: str
@@ -754,12 +764,6 @@ class MongoDocStatusStorage(DocStatusStorage):
         for doc in result:
             counts[doc["_id"]] = doc["count"]
         return counts
-
-    async def get_docs_by_status(
-        self, status: DocStatus
-    ) -> dict[str, DocProcessingStatus]:
-        """Get all documents with a specific status"""
-        return await self.get_docs_by_statuses([status])
 
     async def get_docs_by_statuses(
         self, statuses: list[DocStatus], strict: bool = False
@@ -2646,6 +2650,20 @@ class MongoGraphStorage(BaseGraphStorage):
             labels.append(doc["_id"])
         return labels
 
+    async def iter_labels(self, batch_size: int):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        pipeline = [{"$project": {"_id": 1}}, {"$sort": {"_id": 1}}]
+        cursor = await self.collection.aggregate(pipeline, allowDiskUse=True)
+        batch: list[str] = []
+        async for doc in cursor:
+            batch.append(doc["_id"])
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
     def _construct_graph_node(
         self, node_id, node_data: dict[str, str]
     ) -> KnowledgeGraphNode:
@@ -2887,12 +2905,42 @@ class MongoGraphStorage(BaseGraphStorage):
         if depth > max_depth:
             return result
 
-        cursor = self.collection.find({"_id": {"$in": node_labels}})
+        # Project away source_ids: ranking materialises the WHOLE level before
+        # the cap can discard any of it (the pre-ranking loop could stop at the
+        # first node past max_nodes), and source_ids is the one unbounded field
+        # on the document. The wildcard path feeds _construct_graph_node from a
+        # {"source_ids": 0} cursor already, so it is provably not needed here.
+        cursor = self.collection.find({"_id": {"$in": node_labels}}, {"source_ids": 0})
 
+        # node_labels can name the same node twice (reached by two edges of the
+        # previous level); a duplicate reaching the admission loop would spend a
+        # second slot and trip the cap on a node that is not new.
+        level_nodes = []
+        level_seen = set()
         async for node in cursor:
             node_id = node["_id"]
-            if node_id in seen_nodes:
+            if node_id in seen_nodes or node_id in level_seen:
                 continue
+            level_seen.add(node_id)
+            level_nodes.append(node)
+
+        # find() answers in natural order, not $in order, so an overflowing
+        # level needs the contract's ranking before the cap reads it. Only an
+        # overflowing level pays: a level that fits is admitted whole, and the
+        # contract binds which nodes survive, not their order.
+        if len(level_nodes) > 1 and len(result.nodes) + len(level_nodes) > max_nodes:
+            level_degrees = await self.node_degrees_batch(
+                [
+                    node["_id"]
+                    for node in level_nodes[:_GRAPH_DEGREE_RANK_MAX_CANDIDATES]
+                ]
+            )
+            level_nodes.sort(
+                key=lambda node: (-level_degrees.get(node["_id"], 0), node["_id"])
+            )
+
+        for node in level_nodes:
+            node_id = node["_id"]
             if len(result.nodes) >= max_nodes:
                 result.is_truncated = True
                 return result
@@ -3283,6 +3331,22 @@ class MongoGraphStorage(BaseGraphStorage):
             edge_dict["target"] = edge_dict.get("target_node_id")
             edges.append(edge_dict)
         return edges
+
+    async def iter_edges(self, batch_size: int):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        cursor = self.edge_collection.find({})
+        batch: list[dict] = []
+        async for edge in cursor:
+            item = dict(edge)
+            item["source"] = item.get("source_node_id")
+            item["target"] = item.get("target_node_id")
+            batch.append(item)
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
     async def get_popular_labels(self, limit: int = 300) -> list[str]:
         """Get popular labels(entity names) by node degree (most connected entities)
@@ -4543,7 +4607,7 @@ class MongoVectorDBStorage(BaseVectorStorage):
         """Drop all documents and recreate the vector index. Destructive.
 
         MUST only be called when ``pipeline_status`` is idle (see the
-        Pipeline concurrency contract in ``AGENTS.md``); the only
+        Pipeline concurrency contract in ``docs/design/PipelineConcurrencyContract.md``); the only
         in-tree caller ``clear_documents`` enforces this.
 
         Caveat — only this instance's buffers are cleared. Other

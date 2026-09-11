@@ -119,7 +119,7 @@ LightRAG 的文件处理配置由两部分合成：内容抽取引擎决定原�
 
 ### 2.1 文件处理选项
 
-处理选项以文件为粒度控制多模态分析、知识图谱构建和文本分块的行为；既可在 `LIGHTRAG_PARSER` 中作为规则默认值批量设置（见 [§2.4](#24-默认规则lightrag_parser)），也可通过文件名 hint 对单个文件覆盖（见 [§2.5](#25-单文件覆盖文件名-hint)）。所有选项都是可选的；缺省值见下表。同一文件最多指定一种分块方式（F/R/V/P），其它选项可任意组合。
+处理选项以文件为粒度控制多模态分析、知识图谱构建和文本分块的行为；既可在 `LIGHTRAG_PARSER` 中作为规则默认值批量设置（见 [§2.4](#24-默认规则lightrag_parser)），也可通过文件名 hint 对单个文件覆盖（见 [§2.5](#25-单文件覆盖文件名-hint)）。所有选项都是可选的；缺省值见下表。同一文件最多指定一种分块方式（F/R/V/P/C），其它选项可任意组合。
 
 | 选项 | 类型 | 默认 | 含义 |
 | --- | --- | --- | --- |
@@ -129,8 +129,9 @@ LightRAG 的文件处理配置由两部分合成：内容抽取引擎决定原�
 | `!` | 流水线 | 关闭 | 禁止实体/关系抽取，不构建知识图谱（仅保留 chunks 向量索引，naive / mix 检索仍可用） |
 | `F` | 分块 | 默认 | Fix/固定长度分块：遗留方法, 按固定Token长度或按分隔符机械分割（按分隔符分割时文本块不会出现重叠） |
 | `R` | 分块 | - | Recursive/递归字符分块(RecursiveCharacterTextSplitter@LangChain)：接收一个分隔符列表（默认是 `["\n\n","\n","。","！","？","；","，"," ",""]`，按从语义最强到最弱排列）。优先按段落（双换行符）切分；如果切出的块依然超过 Token 限制，逐级降级使用单换行符 → 中文句末标点（`。！？`）→ 中文句中标点（`；，`）→ 空格 → 逐字符切分。**默认 cascade 包含中文标点**，使中文 / 中英混合文档能在语义边界切分。英文 `.?!` 故意排除（字面量匹配会误切 `0.95` / `e.g.`）。 |
-| `V` | 分块 | - | Vector/向量语义分块(SemanticChunker@LangChain)：首先按句子拆分文本（默认句子切分正则同时识别英文 `.?!` 与中文 `。？！`，使中文 / 中英混合文档能正确切句），计算相邻句子的 Embedding，然后根据指定的阈值策略（如百分位 percentile、标准差 standard_deviation 或四分位距 interquartile）寻找语义断层进行切分。`SemanticChunker` 本身没有 chunk size 上限——任何超过 `chunk_token_size` 的语义块在落库前会自动通过 R 二次切分（保留 V 的非重叠语义）。此分块策略不会出现文本块重叠的情况。 |
+| `V` | 分块 | - | Vector/向量语义分块(SemanticChunker@LangChain)：首先按句子拆分文本（默认句子切分正则同时识别英文 `.?!` 与中文 `。？！`，使中文 / 中英混合文档能正确切句），计算相邻句子的 Embedding，然后根据指定的阈值策略（如百分位 percentile、标准差 standard_deviation 或四分位距 interquartile）寻找语义断层进行切分。`SemanticChunker` 本身没有 chunk size 上限——任何超过 `chunk_token_size` 的语义块在落库前会自动通过 R 二次切分（保留 V 的非重叠语义）。此分块策略不会出现文本块重叠的情况。由于它按句子滑窗逐条求 Embedding，这些 Embedding 请求的规模由 `EMBEDDING_BATCH_NUM`（单请求条目数）限制，而不是由 `chunk_token_size` 决定。 |
 | `P` | 分块 | - | Paragraph/段落语义分块（native）；优先按标题分割，严格避免上一标题底部内容与下一个标题内容混合破坏语义。适合对能够准确识别标题且标题结构清晰的文档进行分块。同一标题下的超长正文 fallback 到 R 时允许按 `CHUNK_P_OVERLAP_SIZE` 保留重叠；相邻大表格之间的桥接文字也可按该预算重复进入前后表格块。此分块方法只能运用在保存在 sidecar 目录的 `lightrag` 内容。如果 `lightrag` 内容不存在，将退化为使用 `R` 方法进行文本分块。此分块方法出现文本块重叠的情况远少于 `R策略` 和 `F策略`。 |
+| `C` | 分块 | - | Custom/自定义分块：显式调用已配置的 `LightRAG.chunking_func`，保持原有六参数契约不变，并复用 `fixed_token` 参数快照。已持久化或后台发现的 C 文档若处理时没有自定义回调，流水线会告警一次并走精确定长分块 fallback；新文本/上传请求则直接返回 422。 |
 
 > 多模态全局开关 `addon_params["enable_multimodal_pipeline"]` 已废弃，相关行为统一由文件级 `i/t/e` 选项控制。详见[附录 A](#附录-a从旧版升级的注意事项)。
 
@@ -142,7 +143,7 @@ LightRAG 的文件处理配置由两部分合成：内容抽取引擎决定原�
 | :-: | --- | --- |
 | i/t/e | Analyzing多模态分析 | 决定是否对 sidecar 中的图像 / 表格 / 公式调用 VLM 做摘要分析。**抽取阶段不受影响**：内容提取引擎按文档实际内容输出 `drawings.json` / `tables.json` / `equations.json` sidecar 文件。这样后续仅修改 `i`/`t`/`e` 选项触发"再分析"即可补做 VLM，无须重新解析原始文件。 |
 | ! | Extraction实体关系抽取 | 跳过实体/关系抽取与图谱写入；chunks 仍写入向量库以保留 naive / mix 检索能力。 |
-| F/R/V/P | Chunking文本分块 | 决定使用哪种分块策略；对解析阶段输出无影响。 |
+| F/R/V/P/C | Chunking文本分块 | 决定使用哪种分块策略；对解析阶段输出无影响。 |
 
 > 模态可用性以"sidecar 文件是否存在"为唯一信号，内容提取引擎不需要在 meta 中声明能力。某文档若没有任何图像/表格/公式，对应 sidecar 不会写入；用户即使开启了 `i/t/e`，对应模态也只会被静默跳过，但 `analyze_multimodal` 会在该篇文档落一行 INFO 级日志（`[analyze_multimodal] sidecar e:equations empty: doc—id ...`），便于排查"VLM 为何没跑"。这种情况不会报错。
 
@@ -227,7 +228,7 @@ notes.[-R].md
 
 ### 2.6 为分块策略附加参数
 
-分块策略选择符（`F` / `R` / `V` / `P`）——无论在 `LIGHTRAG_PARSER` 规则还是文件名 hint 中——都可以用圆括号附加该策略的分块参数。括号内逗号**只**用于分隔参数；规则切分是括号感知的，因此该逗号绝不会被误判为规则分隔符（`;` 与 `,` 都是合法的规则分隔符，但推荐 `;`）。
+分块策略选择符（`F` / `R` / `V` / `P` / `C`）——无论在 `LIGHTRAG_PARSER` 规则还是文件名 hint 中——都可以用圆括号附加该策略的分块参数。括号内逗号**只**用于分隔参数；规则切分是括号感知的，因此该逗号绝不会被误判为规则分隔符（`;` 与 `,` 都是合法的规则分隔符，但推荐 `;`）。
 
 ```text
 notes.[-R(chunk_ts=800,chunk_ol=80)].md                            # 文件名 hint
@@ -238,13 +239,15 @@ LIGHTRAG_PARSER=pdf:legacy-R(chunk_ts=800,chunk_ol=80);*:legacy-R  # 规则
 
 | 参数 | 别名 | 适用策略 | 类型 | 含义 |
 | --- | --- | --- | --- | --- |
-| `chunk_token_size` | `chunk_ts` | F / R / V / P | int（≥ 1） | 各策略的块大小 |
-| `chunk_overlap_token_size` | `chunk_ol` | F / R / P | int（≥ 0） | 块间重叠（V 无重叠） |
+| `chunk_token_size` | `chunk_ts` | F / R / V / P / C | int（≥ 1） | 各策略的块大小 |
+| `chunk_overlap_token_size` | `chunk_ol` | F / R / P / C | int（≥ 0） | 块间重叠（V 无重叠） |
 | `drop_references` | `drop_rf` | P | bool | 分块前丢弃匹配的参考文献块，如 `paper.[-P(drop_rf=true)].pdf`；布尔参数可省略取值，`paper.[-P(drop_rf)].pdf` 等价于 `drop_rf=true` |
 
 - `process_options` 仍是纯选择符字符串；每个参数会写入该策略的 `chunk_options`（见 §5），策略其它来自环境变量的参数保持不变。别名在内部统一归一化为全称。
 - 合并优先级：选择符仍遵循“文件名 hint 的非空选项整体覆盖规则选项”；参数按**同一策略**叠加——先规则参数，再文件名 hint 参数（同一键以文件名为准）。
 - 启动期（`LIGHTRAG_PARSER`）与上传期（文件名 hint）均严格校验：未知参数、类型错误、取值越界、把参数加到不支持的策略（如 `V` 上的 `chunk_ol`）都会给出友好报错。
+
+文本 API 以 `chunking.strategy="custom"` 暴露同一路径；`params` 使用完整的 fixed-token/legacy 参数契约（`chunk_token_size`、`chunk_overlap_token_size`、`split_by_character`、`split_by_character_only`）。如果没有替换 `LightRAG.chunking_func`，`/documents/text` 与 `/documents/texts` 会返回 422。
 
 > `drop_references` 检测调参 `CHUNK_P_REFERENCES_TAIL_N`（默认 `0`：扫描全部内容块；正数表示只扫描文末最后 N 块）/ `CHUNK_P_REFERENCES_HEADINGS`（竖线分隔，默认 `References\|Bibliography\|参考文献`）仅经环境变量、运行时实时读取。drop_references可以通过环境变量 `CHUNK_P_DROP_REFERENCES` 设置为全局默认值.
 
@@ -255,10 +258,11 @@ LIGHTRAG_PARSER=pdf:legacy-R(chunk_ts=800,chunk_ol=80);*:legacy-R  # 规则
 - 文件名 hint 的优先级高于 `LIGHTRAG_PARSER`。如果 hint 指定的引擎不支持该后缀，系统会回退到默认规则继续选择可用引擎。
 - 如果文件名 hint 提供了非空选项串，则以 hint 为准；否则使用 `LIGHTRAG_PARSER` 规则中匹配项的默认选项；都没有则使用全部默认。
 - 如果所有规则都不可用，文件内容提取方式会回退到 `legacy`；如果 `legacy` 也不支持对应的文件后缀，会向系统添加一个错误条目，上传文件保留在 `INPUT` 目录。
-- F/R/V/P至多出现一个；同一选项重复时只生效一次但不报错。
-- 大小写敏感：分块选项 F/R/V/P必须大写；其它选项 i/t/e小写。
+- F/R/V/P/C 至多出现一个；同一选项重复时只生效一次但不报错。
+- 大小写敏感：分块选项 F/R/V/P/C 必须大写；其它选项 i/t/e 小写。
 - 中括号内出现非法字符时，整个 hint 失效，引擎按默认规则解析，选项按 `LIGHTRAG_PARSER` 默认或全部默认；同时落日志 warning。
 - `P` 对任何能产出 `.blocks.jsonl` sidecar 的引擎（`native` / `mineru` / `docling`）抽取出的结构化结果有效；对 `legacy` 路径或无 sidecar 的输出会自动降级到 `R` 并记录 warning。
+- `C` 在有同步调用方的入口必须已经注入自定义回调。`/documents/upload` 会在写文件前同时检查文件名 hint 与命中的 `LIGHTRAG_PARSER` 规则；回调缺失时返回 422。目录扫描与重处理无法让调用方当场修正已持久化 selector，因此接受 C，每次处理告警一次并走 fixed-token fallback。
 
 ## 3. 文件解析引擎
 
@@ -578,7 +582,7 @@ MinerU 自己也有一轮 VLM，由 `MINERU_LOCAL_IMAGE_ANALYSIS` 开启。它�
 
 ### 5.1 process_options vs chunk_options 的职责
 
-`process_options` 选**用哪种**分块策略（F/R/V/P），`chunk_options` 决定那一路分块器**用哪些参数**。两者职责正交：前者是单字符 selector，后者是结构化字典。
+`process_options` 选**用哪种**分块策略（F/R/V/P/C），`chunk_options` 决定那一路分块器**用哪些参数**。两者职责正交：前者是单字符 selector，后者是结构化字典。C 刻意映射到 `fixed_token` 子字典，因为这些值正好填入 legacy callback 的六个参数。
 
 ```
 env vars                                                  (启动期一次性读取)
@@ -597,7 +601,7 @@ chunker(tokenizer, content, chunk_token_size, **strategy_kwargs)   (分块时按
 - **env vars** 在 `LightRAG.__init__` 阶段（由 `default_chunker_config()` 读取 strategy 特定 env，再由 `_apply_chunk_size_overlay` 兜底 legacy env）灌进 `addon_params["chunker"]`。
 - **`addon_params["chunker"]`** 是 `ObservableAddonParams` 字段；Server 部署只需通过 env / 重启即可让新值生效。若需要在 Python 进程内运行时改它（不重启）以及 per-file 覆盖，请见[第十一章 Python SDK 调用](#11-python-sdk-调用)。
 - **`full_docs.chunk_options`** 在 `apipeline_enqueue_documents` 入队时冻结：默认由 `resolve_chunk_options(self.addon_params, ...)` 现场拼装；若调用方传入 `chunk_options` 参数则原样持久化（SDK 用法，见 §11.4）。
-- **分块器调用**从 `full_docs.chunk_options` 取对应子字典，按 `process_options.chunking` selector 派发到 F/R/V/P。
+- **分块器调用**从 `full_docs.chunk_options` 取对应子字典，按 `process_options.chunking` selector 派发到 F/R/V/P/C。自定义 callback 可能改写原文，因此其输出不做 sidecar provenance 回填；C 的内置 fallback 会产生精确 source span，可以回填。
 
 ### 5.2 环境变量
 
@@ -660,6 +664,16 @@ chunker(tokenizer, content, chunk_token_size, **strategy_kwargs)   (分块时按
   ```
 
   喂给 LangChain `SemanticChunker` 的句子切分正则。默认同时识别英文 `.?!`（要求后接空白，因此 `0.95` 不会被切开）和中文 `。？！`（不要求空白，适应中文连写）。env 值是原始正则，无需 JSON 引号。
+
+##### V 的 Embedding 请求
+
+上游 `SemanticChunker` 会把**整篇文档**放进一次调用——每个句子滑窗一条，因此单请求条目数 = 全文句数，总 token 约为 `(2 × CHUNK_V_BUFFER_SIZE + 1) × 全文`。没有任何 provider 绑定会在内部切分这个列表，所以由 V 自己收口：
+
+- **单请求条目数**上限为 `EMBEDDING_BATCH_NUM`。设为 `0` 或负数等于主动放弃这个上界。
+- **同时在途的请求数**上限为 `EMBEDDING_FUNC_MAX_ASYNC`。这个上界的作用域是**单次分块调用**，不是整个部署——跨实例并发仍由既有的 Embedding 限流器负责。任一批失败后不再发起新批。
+- **单条滑窗的 token 长度**按 Embedding 函数声明的 `max_token_size` **尽力**截断。在 API server 路径下，该值优先取 `EMBEDDING_TOKEN_LIMIT`，未设置时则取 binding 自带的默认值——所有内置 binding 都声明了这个值（openai / azure_openai / ollama / jina / bedrock / lollms 为 `8192`，voyageai 为 `32000`，gemini 为 `2048`），因此不设 `EMBEDDING_TOKEN_LIMIT` **并不会**把预算交给 `CHUNK_V_SIZE`。只有当 `EmbeddingFunc` 自身未声明上限（`max_token_size=None` 或 `0`，仅直接调用 SDK 的场景可达）时，才回退到生效的 `CHUNK_V_SIZE`。"尽力"是字面意思：截断用的是 LightRAG 的通用 tokenizer，不保证等于 Embedding 模型的 tokenizer；而 provider 还可能在此之后改写输入（OpenAI 绑定会先拼接 document prefix，再执行自己的截断）。所以 `EMBEDDING_BATCH_NUM × 上限` 只是 LightRAG tokenizer 下的逻辑上界，**不是**对服务端实际收到多少 token 的承诺；provider 自身的原生截断（若有）独立生效。
+
+这里的截断不会丢失 chunk 内容：V 输出的分块是原文 span，超预算的滑窗只会让它参与的那一处边界距离判定降级。每篇文档最多一条聚合警告，报告有多少滑窗被截断。
 
 #### P —— 段落语义
 
@@ -738,7 +752,7 @@ chunker(tokenizer, content, chunk_token_size, **strategy_kwargs)   (分块时按
 }
 ```
 
-selector → 子字典映射：F → `fixed_token`，R → `recursive_character`，V → `semantic_vector`，P → `paragraph_semantic`；无 selector 默认 F。各子字典与对应分块器函数的 keyword-only 参数一一对应；新增参数时无需改 dispatcher，只在 chunker 函数添加 kwarg 即可。
+selector → 子字典映射：F → `fixed_token`，R → `recursive_character`，V → `semantic_vector`，P → `paragraph_semantic`，C → `fixed_token`；无 selector 默认 F。C 将 fixed-token 字段作为 legacy callback 的位置参数读取；其余内置策略仍把各自子字典映射到 chunker keyword 参数。
 
 ### 5.5 缺失兼容
 
@@ -760,8 +774,8 @@ selector → 子字典映射：F → `fixed_token`，R → `recursive_character`
 | `content_hash` | 内容 MD5，用于跨文件名查重。`parse_format=raw` 取 `sanitize_text_for_encoding` 后文本的 hash；`parse_format=lightrag` 取 `*.blocks.jsonl` 文件 hash；`parse_format=pending_parse` 不写入，待抽取完成后补上。 |
 | `lightrag_document_path` | `parse_format=lightrag` 时保存结构化 LightRAG Document 的路径；新记录优先保存为相对 `INPUT_DIR` 的路径，例如 `__parsed__/report.docx.parsed/report.blocks.jsonl`。注意路径中的子目录与 blocks 文件名都使用规范化 basename（不含 hint）。 |
 | `parse_engine` | 实际完成抽取的引擎：`legacy`, `native`, `mineru`, `docling`。对于待抽取文件，也可暂存目标引擎。 |
-| `process_options` | 入队时记录的原始处理选项串（不含引擎名和分隔 `-`），例如 `"iet"`、`"R!"`、`""`。下游各阶段以此字段为权威源，决定是否启用图像/表格/公式分析（`i/t/e`）、是否禁止知识图谱构建（`!`）以及分块方式（`F/R/V/P`）。空字符串等价于全部默认值。 |
-| `chunk_options` | 入队时**冻结**的分块器参数快照（精简字典：只保留 `process_options` 选中的那一路策略子字典，其它策略丢弃）。由 SDK 路径调用方传入或由 `resolve_chunk_options(self.addon_params, process_options=…)` 从实例字段（含 env 默认）兜底（见 §5.1）。`process_options` 选哪种分块策略（F/R/V/P），`chunk_options` 决定那一路分块器使用哪些参数。下游 `process_single_document` 在分块前从此字段读取专属 kwargs；持久化保证 env 变化、续跑、重启后老文档行为可复现。重新解析时与 `process_options` 一同改写。 |
+| `process_options` | 入队时记录的原始处理选项串（不含引擎名和分隔 `-`），例如 `"iet"`、`"R!"`、`"C"`、`""`。下游各阶段以此字段为权威源，决定是否启用图像/表格/公式分析（`i/t/e`）、是否禁止知识图谱构建（`!`）以及分块方式（`F/R/V/P/C`）。空字符串等价于全部默认值。 |
+| `chunk_options` | 入队时**冻结**的分块器参数快照（精简字典：只保留 `process_options` 选中的那一路策略子字典，其它策略丢弃）。由 SDK 路径调用方传入或由 `resolve_chunk_options(self.addon_params, process_options=…)` 从实例字段（含 env 默认）兜底（见 §5.1）。`process_options` 选哪种分块策略（F/R/V/P/C），`chunk_options` 决定那一路分块器使用哪些参数；C 复用 `fixed_token` 子字典。下游 `process_single_document` 在分块前读取该快照；持久化保证 env 变化、续跑、重启后老文档行为可复现。重新解析时与 `process_options` 一同改写。 |
 
 `pending_parse` 表示文件已经入队，但还没有完成抽取。抽取成功后会改写为 `raw` 或 `lightrag`，并补齐 `content_hash`。抽取失败时保留 `pending_parse` 和空 `content`，便于后续排查和重试。
 
@@ -818,9 +832,10 @@ __parsed__/<base>.docling_raw/
 | 首次解析 | 取回产物，然后原子写入 `_manifest.json`。docling 的取回过程是 `POST /v1/convert/file/async` → 长轮询 `/v1/status/poll/{task_id}?wait=N` → `GET /v1/result/{task_id}` → 安全解压 zip（拒绝绝对路径与 `..`）。 |
 | 重新解析（缓存命中） | 不调用外部服务，不重写产物；仅重跑 adapter + writer 重新生成 sidecar（这正是 adapter 升级代价很低的原因）。 |
 | 重新解析（缓存未命中） | 清空目录，重新取回并写 manifest。 |
-| `DELETE /documents` 且 `delete_file=True` | `*.parsed/`、原始产物包、源文件一并删除。 |
-| `DELETE /documents` 且 `delete_file=False` | 保留全部产物，仅删除 doc_status 与 KG 数据。 |
-| `clear_documents` / 整体清空 `__parsed__` | 随之一并清除。 |
+| `DELETE /documents/delete_document` 且 `delete_file=True` | `*.parsed/`、原始产物包、源文件一并删除。 |
+| `DELETE /documents/delete_document` 且 `delete_file=False` | 保留全部产物，仅删除 doc_status 与 KG 数据。 |
+| `DELETE /documents`（`clear_documents`）且 `delete_parsed_files=true` | 整体删除 `__parsed__`；顶层输入文件始终会被删除，与此参数无关。 |
+| `DELETE /documents`（`clear_documents`）且 `delete_parsed_files=false`（默认） | 保留 `__parsed__`；顶层输入文件仍会被删除。 |
 | scan 周期 | **不会**回收孤立的产物包——只有用户显式删除时才移除，避免误扫掉调试现场。 |
 
 强制重解析（完全绕过缓存）：`LIGHTRAG_FORCE_REPARSE_NATIVE` / `LIGHTRAG_FORCE_REPARSE_MINERU` / `LIGHTRAG_FORCE_REPARSE_DOCLING`（§3.7）。
@@ -1086,10 +1101,11 @@ PENDING ─►├─ parse_queues["mineru"]  ─► [mineru 池  × N2] ─┼�
 | 环境变量 | 默认值 | 作用 | 调优建议 |
 | --- | --- | --- | --- |
 | `MAX_PARALLEL_PARSE_NATIVE` | `5` | N1: native 解析（docx / pdf / txt 等纯本地处理）并发 worker 数 | 纯 CPU、内存占用低，可按 CPU 核数提高 |
-| `MAX_PARALLEL_PARSE_MINERU` | `2` | N2: MinerU 解析并发 worker 数 | MinerU 占用 GPU/CPU 显著，**默认 2 为适度并发**。资源紧张时可降到 1；本地部署且显存充足时可设 2-3；走 MinerU 官方云端服务时可适当提高（受云端配额限制） |
-| `MAX_PARALLEL_PARSE_DOCLING` | `2` | N3: Docling 解析并发 worker 数 | Docling 同样资源敏感，**默认 2 为适度并发**。资源紧张时可降到 1；本地部署且 CPU/GPU 充足时可设 2-3 |
+| `MAX_PARALLEL_PARSE_MINERU` | `1` | N2: MinerU 解析并发 worker 数 | MinerU 占用 GPU/CPU 显著，因此默认只启用一个 worker。本地部署且显存充足时可设 2-3；走 MinerU 官方云端服务时可适当提高（受云端配额限制） |
+| `MAX_PARALLEL_PARSE_DOCLING` | `1` | N3: Docling 解析并发 worker 数 | Docling 同样资源敏感，因此默认只启用一个 worker。本地部署且 CPU/GPU 充足时可设 2-3 |
 | `MAX_PARALLEL_ANALYZE` | `5` | N4: 多模态分析（VLM 图片 / 表格描述）并发 worker 数 | 直接消耗 VLM 配额。建议 ≤ VLM 服务并发上限 |
-| `MAX_PARALLEL_INSERT` | `3` | N5: 实体 / 关系抽取 + 入库阶段并发文档数 | 推荐 `MAX_ASYNC_LLM / 3`，区间 2~10。该阶段每个文档会触发多次 LLM 调用，过高会撞 LLM 限流。同时该值还作为 `asyncio.Semaphore` 用于二次约束（worker 数和信号量值一致） |
+| `MAX_ASYNC_LLM` | `4` | 基础 LLM 并发与 N5 的单文档 task 基数 | 对单个文档，文本块实体/关系抽取最多并发运行 `MAX_ASYNC_LLM` 个 task；每个实体合并或关系合并阶段最多运行 `2 × MAX_ASYNC_LLM` 个 task。设置 `EXTRACT_MAX_ASYNC_LLM` 后，它会独立限制实际 Extract 角色 LLM 请求，不改变这些 task 上限 |
+| `MAX_PARALLEL_INSERT` | `3` | N5: 实体 / 关系抽取 + 入库阶段并发文档数 | 推荐 `MAX_ASYNC_LLM / 3`，区间 2~10。它控制文档数量，不控制单个文档内的 chunk 或合并 task 上限。同时该值还作为 `asyncio.Semaphore` 用于二次约束（worker 数和信号量值一致） |
 | `QUEUE_SIZE_PARSE` | `20` | parse（native/MinerU/Docling）输入队列长度 | 一般无需调整。队列内仅为轻量 doc_id（大文档体在进入 analyze 前已剥离），仅限制 pipeline 一次预派发给 parse worker 的待处理文档数，调整影响很小 |
 | `QUEUE_SIZE_ANALYZE` | `100` | analyze 队列（parse → analyze 阶段）的有界容量 | 一般无需调整。极少量大批量任务（成千上万）可适当提高，避免 enqueue 端反压；内存紧张时可调低 |
 | `QUEUE_SIZE_INSERT` | `4` | analyze → process 阶段间的队列容量 | process 是流水线中最慢、最耗内存的阶段，队列特意做小，给上游提供反压防止内存堆积 |
@@ -1097,18 +1113,19 @@ PENDING ─►├─ parse_queues["mineru"]  ─► [mineru 池  × N2] ─┼�
 **几个要点：**
 
 1. **解析阶段按引擎隔离**，所以混用 native/mineru/docling 时不必担心一种引擎慢拖累另一种。
-2. **mineru / docling 默认 2**：两者资源占用高，默认保持适度并发。资源紧张时可降到 1（避免 OOM / 显存竞争 / 失败重试）；如果你部署了多 GPU 或专门的解析服务器，可手动调高。
+2. **mineru / docling 默认 1**：两者资源占用高，因此默认避免多个解析任务并发（以及由此带来的 OOM、显存竞争和失败重试）；如果你部署了多 GPU 或专门的解析服务器，可手动调高。
 3. **`MAX_PARALLEL_INSERT` 兼任 worker 池大小和信号量上限**：流水线创建 `Semaphore(max_parallel_insert)`，每个 process worker 在抽取入库前还要拿一次信号量。所以哪怕你把 worker 数手动改大，实际并发上限仍由这个值决定——直接调它就够了。
-4. **queue size 与背压**：`QUEUE_SIZE_INSERT=4` 这个偏小的默认值是有意为之——process 阶段慢且占内存，让 analyze 阶段在队列写满时阻塞、再反压到 parse 阶段，避免一次性把成千上万份解析结果堆在内存里。
-5. **改后生效方式**：所有参数通过 `.env`（或环境变量）传入，仅在 `LightRAG` 实例构造时读取一次；改完需要重启服务。
-6. **分块不随并发增长**：分块在一个专用的单 worker 线程池里执行，目的是不阻塞事件循环，并发度不随 `MAX_PARALLEL_INSERT` 提高，调大并发不会让分块更快。自定义 `chunking_func` 仍在事件循环上执行（它的契约允许触碰运行中的事件循环），CPU 密集的实现应自行 `asyncio.to_thread`。
+4. **task 上限与请求上限不同**：`MAX_ASYNC_LLM` 设置 N5 单文档 chunk 抽取的 task 上限，以及其两倍的合并 task 上限。实际抽取和合并摘要请求使用 Extract 角色的上限：设置了 `EXTRACT_MAX_ASYNC_LLM` 时使用它，否则使用 `MAX_ASYNC_LLM`。缓存、图的 keyed lock 和角色上限都会让观测到的实际请求并发低于 task 并发。
+5. **queue size 与背压**：`QUEUE_SIZE_INSERT=4` 这个偏小的默认值是有意为之——process 阶段慢且占内存，让 analyze 阶段在队列写满时阻塞、再反压到 parse 阶段，避免一次性把成千上万份解析结果堆在内存里。
+6. **改后生效方式**：所有参数通过 `.env`（或环境变量）传入，仅在 `LightRAG` 实例构造时读取一次；改完需要重启服务。
+7. **分块不随并发增长**：分块在一个专用的单 worker 线程池里执行，目的是不阻塞事件循环，并发度不随 `MAX_PARALLEL_INSERT` 提高，调大并发不会让分块更快。自定义 `chunking_func` 仍在事件循环上执行（它的契约允许触碰运行中的事件循环），CPU 密集的实现应自行 `asyncio.to_thread`。
 
 **典型调优场景：**
 
-- 大量 PDF + 本地 MinerU 单 GPU：`MAX_PARALLEL_PARSE_MINERU=2`、`MAX_PARALLEL_ANALYZE=5`、`MAX_PARALLEL_INSERT=3`（默认即可；显存紧张时把 MINERU 降到 1）。
+- 大量 PDF + 本地 MinerU 单 GPU：`MAX_PARALLEL_PARSE_MINERU=1`、`MAX_PARALLEL_ANALYZE=5`、`MAX_PARALLEL_INSERT=3`（默认即可；确认显存充足后再提高 MINERU）。
 - 大量 PDF + MinerU 云端服务：`MAX_PARALLEL_PARSE_MINERU=3~5`（视云端配额），其它保持默认。
 - 纯 docx / txt（仅走 native）：`MAX_PARALLEL_PARSE_NATIVE=10`、`MAX_PARALLEL_INSERT` 按 `MAX_ASYNC_LLM/3` 推算。
-- LLM 限流明显：先降 `MAX_PARALLEL_INSERT`（process 阶段每文档多次 LLM 调用），再降 `MAX_PARALLEL_ANALYZE`（VLM 是独立配额）。
+- Extract 角色 LLM 限流明显：先降 `EXTRACT_MAX_ASYNC_LLM`（未设置覆盖时降 `MAX_ASYNC_LLM`）以限制 provider 请求；如需减少在途文档数或内存，再同时降低 `MAX_PARALLEL_INSERT`。`MAX_PARALLEL_ANALYZE` 控制独立的 VLM 阶段。
 
 ### 8.7 准入与请求限制
 
@@ -1160,10 +1177,10 @@ PENDING ─►├─ parse_queues["mineru"]  ─► [mineru 池  × N2] ─┼�
 | 引擎对比 | 若 `process_options` 隐含的引擎 ≠ `full_docs.parse_engine`，**仅 warn**，不重新解析。已抽取的内容是不可变事实，重新跑不同引擎会产生不一致。要切换引擎请先 delete 整个文档再重传。 |
 | 旧 chunks / 实体 / 关系清理 | 读 `status_doc.chunks_list` 收集旧 chunk id 集，调 `_purge_doc_chunks_and_kg(doc_id, chunk_ids)`：从 `chunks_vdb` / `text_chunks` 删除 chunk 行；按 `entity_chunks` / `relation_chunks` 反查受影响的实体 / 关系，对失去全部源的条目直接从图谱与向量库删除，对仍有其它文档贡献的条目调 `rebuild_knowledge_from_chunks` 用剩余 chunks 重建；最后删除 `full_entities` / `full_relations` 中本 doc 的索引行。purge 完成后 `status_doc.chunks_list = []` / `chunks_count = 0` 重置，避免后续 state-machine upsert 写回旧 ID。 |
 | `analyze_multimodal` | 对已启用模态，每次运行都会重新计算 sidecar item 分析并覆盖已有的 `llm_analyze_result`。由于 LLM cache 的存在重复计算通常会保持语义字段不变，只会重写 `analyze_time` 等运行时字段；cache miss，例如更换模型和提示词等，保存内容才可能与上次不同。 |
-| 重新分块 | 按新 `process_options.chunking` 选策略，参数从 `full_docs.chunk_options` 读取（入队快照，不会因续跑被覆盖；env 改动后老文档仍按入队那一刻的参数分块）。LightRAG Document path 在 `process_options=P` 时走 paragraph_semantic，否则按 selector 分发到 F/R/V。 |
+| 重新分块 | 按新 `process_options.chunking` 选策略，参数从 `full_docs.chunk_options` 读取（入队快照，不会因续跑被覆盖；env 改动后老文档仍按入队那一刻的参数分块）。P 走 paragraph_semantic，F/R/V 走对应内置 chunker，C 走自定义 callback；若 callback 已移除，则告警后走 fixed-token fallback。 |
 | 实体抽取 / KG-skip | 按新 `process_options.skip_kg` 决定 |
 
-> 这条规则保证：用户改 `i/t/e` 重传同名文档（先删旧 doc 再上传带新 hint 的文件）时，多模态分析能增量补齐；改 `F/R/V/P` 时 chunks 与图谱重建；改 `!` 时停掉或恢复 KG 构建。引擎变更被视为"重大变更"，统一由 delete + 重传完成，不在续跑路径里隐式发生。
+> 这条规则保证：用户改 `i/t/e` 重传同名文档（先删旧 doc 再上传带新 hint 的文件）时，多模态分析能增量补齐；改 `F/R/V/P/C` 时 chunks 与图谱重建；改 `!` 时停掉或恢复 KG 构建。引擎变更被视为"重大变更"，统一由 delete + 重传完成，不在续跑路径里隐式发生。
 
 ## 10. 常见问题排查
 
@@ -1296,7 +1313,7 @@ per-file 个性化的典型场景：管理 UI 单独配置某个文件的 separa
 | 路由 | `LIGHTRAG_PARSER` | §2.3、§2.4、§2.5 |
 | 分块 | `CHUNK_SIZE`、`CHUNK_OVERLAP_SIZE`、`CHUNK_{F,R,V,P}_*` | §5.2 |
 | 多模态 | `VLM_PROCESS_ENABLE`、`VLM_MAX_IMAGE_BYTES`、`VLM_MIN_IMAGE_PIXEL`、`MAX_EXTRACT_INPUT_TOKENS`、`SURROUNDING_*_MAX_TOKENS`、`MM_EXTRACT_CONTENT_MIN_TOKENS` | §4 |
-| VLM / 角色模型 | `VLM_LLM_*`、`VLM_MAX_ASYNC_LLM` | [RoleSpecificLLMConfiguration-zh.md](RoleSpecificLLMConfiguration-zh.md) |
+| LLM / VLM 角色模型 | `MAX_ASYNC_LLM`、`EXTRACT_LLM_*`、`EXTRACT_MAX_ASYNC_LLM`、`VLM_LLM_*`、`VLM_MAX_ASYNC_LLM` | [RoleSpecificLLMConfiguration-zh.md](RoleSpecificLLMConfiguration-zh.md) |
 | legacy 引擎 | `PDF_DECRYPT_PASSWORD` | §3.2 |
 | native 引擎 | `NATIVE_MD_IMAGE_*` | §3.3 |
 | native docx smart_heading | `DOCX_SMART_HEADING`、`DOCX_SMART_*` 调优项 | §3.3 与 `env.example` 的 smart_heading 注释块 |

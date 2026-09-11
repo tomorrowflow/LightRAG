@@ -172,12 +172,17 @@ async def test_graph_only_normal_ingestion_rebuilds_into_nano_vector_storage(
             func=failing_embedding,
         ),
         entity_extract_max_gleaning=0,
+        # EXTRACTION_RESULT is delimiter-formatted, so the parser must be too.
+        # The field otherwise defaults from ENTITY_EXTRACTION_USE_JSON, which
+        # env.example ships as true -- leaving it ambient makes the assertions
+        # below depend on the developer's .env.
+        entity_extraction_use_json=False,
     )
     await graph_only_rag.initialize_storages()
     await graph_only_rag.ainsert("Alice knows Bob.", file_paths="example.txt")
 
-    processed_docs = await graph_only_rag.doc_status.get_docs_by_status(
-        DocStatus.PROCESSED
+    processed_docs = await graph_only_rag.doc_status.get_docs_by_statuses(
+        [DocStatus.PROCESSED]
     )
     assert len(processed_docs) == 1
     doc_id, doc_status = next(iter(processed_docs.items()))
@@ -224,7 +229,9 @@ async def test_graph_only_normal_ingestion_rebuilds_into_nano_vector_storage(
         compute_mdhash_id("Bob", prefix="ent-"),
     ]
     relationship_id = compute_mdhash_id("AliceBob", prefix="rel-")
-    reopened_docs = await indexed_rag.doc_status.get_docs_by_status(DocStatus.PROCESSED)
+    reopened_docs = await indexed_rag.doc_status.get_docs_by_statuses(
+        [DocStatus.PROCESSED]
+    )
 
     assert doc_id in reopened_docs
     assert reopened_docs[doc_id].chunks_list == chunk_ids

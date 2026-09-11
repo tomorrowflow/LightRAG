@@ -453,6 +453,9 @@ _CHUNKING_METHOD_LABELS: dict[str, str] = {
     "P": "paragraph_semantic",
 }
 
+_CUSTOM_CHUNKING_METHOD = "custom_chunking_func"
+_CUSTOM_CHUNKING_FALLBACK_METHOD = "custom_chunking_fallback_fixed_token"
+
 
 _CHUNK_LOG_KEY_ALIASES: dict[str, str] = {
     "chunk_overlap_token_size": "overlap",
@@ -695,7 +698,7 @@ class _PipelineMixin:
                 content-dedup happens after parsing). Ignored when ``ids``
                 is provided (see ``ids`` above).
             parse_engine: file extraction engine already used or target engine for pending_parse
-            process_options: per-document processing options string (i/t/e/!/F/R/V/P);
+            process_options: per-document processing options string (i/t/e/!/F/R/V/P/C);
                 accepted as a single string broadcast to every input or as a list
                 aligned with ``input``. Stored verbatim on ``full_docs`` and
                 mirrored to ``doc_status.metadata['process_options']``.
@@ -1101,8 +1104,8 @@ class _PipelineMixin:
             }
             if content_data.get("content_hash"):
                 base["content_hash"] = content_data["content_hash"]
-            # Stamp the KG write-progress marker at BIRTH (issue #3400
-            # fail-closed purge). A brand-new row provably owns nothing in the
+            # Stamp the KG write-progress marker at BIRTH, for the
+            # fail-closed purge. A brand-new row provably owns nothing in the
             # graph, and every pre-merge state a document can fail in —
             # PENDING, PARSING, ANALYZING, PROCESSING-before-merge — inherits
             # that fact by carry-over. This is what lets deletion clean up a
@@ -2848,8 +2851,8 @@ class _PipelineMixin:
         ``_reset_failed_page`` and scan's ``_confirm_full_docs_absent``.
         """
         # Documents carrying a custom-chunk patch journal belong to an
-        # in-flight or failed ainsert_custom_chunks operation (issue #3400
-        # Phase 3). Ordinary pipeline processing must not touch them: a reset
+        # in-flight or failed ainsert_custom_chunks operation. Ordinary
+        # pipeline processing must not touch them: a reset
         # would strip the journal and rebuild the whole document, discarding
         # the operation's recovery anchor. They are resumed by the SDK caller
         # (same call) or rolled back by /documents/scan.
@@ -4882,13 +4885,17 @@ class _PipelineMixin:
 
                 # Chunker dispatch is driven by whether ``process_options``
                 # explicitly named a chunking strategy:
-                #   - Explicit selector (F/R/V/P present in the raw
+                #   - Explicit built-in selector (F/R/V/P present in the raw
                 #     options string): dispatch to a chunker that
                 #     follows the standardized file-chunker contract
                 #     ``(tokenizer, content, chunk_token_size, *,
                 #     <strategy kwargs>)``, with kwargs supplied from
                 #     the per-doc ``chunk_options`` snapshot persisted
                 #     at enqueue time.
+                #   - Explicit C selector: invoke ``self.chunking_func`` with
+                #     the legacy six-argument contract. If the callback is the
+                #     unmodified default, warn and use the exact fixed-token
+                #     file chunker so persisted/background work stays viable.
                 #   - No selector supplied: honor the
                 #     externally-customizable ``self.chunking_func``
                 #     with its legacy 6-arg signature so existing
@@ -4922,6 +4929,22 @@ class _PipelineMixin:
                 # ``doc_status.metadata['chunk_opts']`` via ``extraction_meta``
                 # so admin/list APIs can see the actual chunker params used.
                 chunk_opts_str: str = ""
+                chunk_method: str = "fixed_token_fallback"
+                sidecar_backfill_eligible = False
+
+                from lightrag.chunker import chunking_by_token_size
+
+                is_builtin_chunker = self.chunking_func is chunking_by_token_size
+                if (
+                    doc_process_opts.chunking_explicit
+                    and doc_process_opts.chunking != "C"
+                    and not is_builtin_chunker
+                ):
+                    logger.warning(
+                        "Custom chunking_func bypassed: process_options "
+                        f"explicitly selects strategy {doc_process_opts.chunking} "
+                        f"for d-id: {doc_id}"
+                    )
 
                 if doc_process_opts.chunking_explicit:
                     from lightrag.chunker import (
@@ -4935,7 +4958,76 @@ class _PipelineMixin:
                     )
 
                     strategy = doc_process_opts.chunking
-                    if strategy == "P":
+                    if strategy == "C":
+                        # C makes the legacy extension point explicit while
+                        # preserving its six positional arguments verbatim.
+                        # Its snapshot is intentionally the fixed-token one.
+                        c_opts = dict(chunk_opts.get("fixed_token") or {})
+                        c_chunk_size = int(
+                            c_opts.get("chunk_token_size", resolved_chunk_size)
+                        )
+                        c_args = (
+                            self.tokenizer,
+                            content,
+                            c_opts.get("split_by_character"),
+                            c_opts.get("split_by_character_only", False),
+                            c_opts.get(
+                                "chunk_overlap_token_size",
+                                self.chunk_overlap_token_size,
+                            ),
+                            c_chunk_size,
+                        )
+                        chunk_opts_str = _format_chunking_params(
+                            c_chunk_size,
+                            {
+                                "split_by_character": c_args[2],
+                                "split_by_character_only": c_args[3],
+                                "overlap": c_args[4],
+                            },
+                        )
+
+                        if is_builtin_chunker:
+                            logger.warning(
+                                "Custom chunking_func unavailable for selector C; "
+                                "using fixed-token fallback "
+                                f"for d-id: {doc_id}"
+                            )
+                            logger.info(
+                                "Chunking C(fallback F): "
+                                f"{chunk_opts_str}, doc_id: {doc_id}"
+                            )
+                            chunking_result = await run_in_chunking_executor(
+                                chunking_by_fixed_token,
+                                self.tokenizer,
+                                content,
+                                c_chunk_size,
+                                _emit_source_span=True,
+                                split_by_character=c_args[2],
+                                split_by_character_only=c_args[3],
+                                chunk_overlap_token_size=c_args[4],
+                            )
+                            chunk_method = _CUSTOM_CHUNKING_FALLBACK_METHOD
+                            sidecar_backfill_eligible = True
+                        else:
+                            logger.info(
+                                f"Chunking C(custom): {chunk_opts_str}, doc_id: {doc_id}"
+                            )
+                            try:
+                                # Keep the documented extension point on the
+                                # event loop; synchronous factories may touch
+                                # the running loop, while async callbacks are
+                                # awaited immediately. CPU-bound callbacks own
+                                # any desired thread offload.
+                                chunking_result = self.chunking_func(*c_args)
+                                if inspect.isawaitable(chunking_result):
+                                    chunking_result = await chunking_result
+                            except Exception as exc:
+                                raise RuntimeError(
+                                    "C custom chunking_func failed "
+                                    f"for d-id {doc_id}: {exc}"
+                                ) from exc
+                            chunk_method = _CUSTOM_CHUNKING_METHOD
+                    elif strategy == "P":
                         # P carries its own ``chunk_token_size`` (CHUNK_P_SIZE
                         # env or ``addon_params['chunker']['paragraph_semantic']``);
                         # pop it out of the kwargs so we don't pass it
@@ -4963,6 +5055,7 @@ class _PipelineMixin:
                             doc_id=doc_id,
                             **p_opts,
                         )
+                        chunk_method = _CHUNKING_METHOD_LABELS["P"]
                     elif strategy == "R":
                         # R carries its own optional ``chunk_token_size``
                         # override (CHUNK_R_SIZE env or
@@ -5009,6 +5102,8 @@ class _PipelineMixin:
                             r_chunk_size,
                             **r_opts,
                         )
+                        chunk_method = _CHUNKING_METHOD_LABELS["R"]
+                        sidecar_backfill_eligible = True
                     elif strategy == "V":
                         # V carries its own optional ``chunk_token_size``
                         # advisory ceiling override (CHUNK_V_SIZE env or
@@ -5018,6 +5113,16 @@ class _PipelineMixin:
                         v_chunk_size = int(
                             v_opts.pop("chunk_token_size", resolved_chunk_size)
                         )
+                        # Deployment-level embedding knobs, not per-doc chunk
+                        # params: DISCARD any same-named key rather than let it
+                        # override the global config.  Popping is not optional
+                        # either — the HTTP model forbids extras, but
+                        # ``addon_params['chunker']['semantic_vector']`` is
+                        # free-form SDK input and a persisted snapshot outlives
+                        # schema changes, so leaving one in would reach the
+                        # ``**v_opts`` splat below as a duplicate keyword.
+                        v_opts.pop("embedding_batch_num", None)
+                        v_opts.pop("embedding_max_async", None)
                         # ``sentence_split_regex`` is the one key that does NOT
                         # win from the per-doc snapshot: it is re-read live from
                         # the operator-controlled config so a pattern persisted
@@ -5033,8 +5138,12 @@ class _PipelineMixin:
                             content,
                             v_chunk_size,
                             embedding_func=self.embedding_func,
+                            embedding_batch_num=self.embedding_batch_num,
+                            embedding_max_async=self.embedding_func_max_async,
                             **v_opts,
                         )
+                        chunk_method = _CHUNKING_METHOD_LABELS["V"]
+                        sidecar_backfill_eligible = True
                     else:  # "F"
                         # F honors its own ``chunk_token_size`` override
                         # (``addon_params['chunker']['fixed_token']`` or a
@@ -5057,6 +5166,8 @@ class _PipelineMixin:
                             _emit_source_span=True,
                             **f_opts,
                         )
+                        chunk_method = _CHUNKING_METHOD_LABELS["F"]
+                        sidecar_backfill_eligible = True
                 else:
                     f_opts = chunk_opts.get("fixed_token") or {}
                     # Honor the F-strategy ``chunk_token_size`` override (from
@@ -5090,13 +5201,11 @@ class _PipelineMixin:
                     logger.info(
                         f"Chunking F(legacy): {chunk_opts_str}, doc_id: {doc_id}"
                     )
-                    from lightrag.chunker import chunking_by_token_size
 
                     # Only the unmodified default fixed-token chunker understands the
                     # private ``_emit_source_span`` kwarg; a user-supplied
                     # ``chunking_func`` must not receive it.
                     legacy_kwargs = {}
-                    is_builtin_chunker = self.chunking_func is chunking_by_token_size
                     if is_builtin_chunker:
                         legacy_kwargs["_emit_source_span"] = True
                     legacy_args = (
@@ -5130,6 +5239,8 @@ class _PipelineMixin:
                         chunking_result = self.chunking_func(
                             *legacy_args, **legacy_kwargs
                         )
+                    chunk_method = "legacy_chunking_func"
+                    sidecar_backfill_eligible = is_builtin_chunker
                 if inspect.isawaitable(chunking_result):
                     chunking_result = await chunking_result
 
@@ -5163,20 +5274,10 @@ class _PipelineMixin:
                     "parse_engine": resolve_doc_status_parse_engine(
                         persisted_format, persisted_engine
                     ),
-                    "chunk_method": (
-                        # Explicit selector in process_options: reflect
-                        # the dispatched strategy.  ``fixed_token_fallback``
-                        # is preserved as a defensive label in case a
-                        # future selector char slips past the validator.
-                        _CHUNKING_METHOD_LABELS.get(
-                            doc_process_opts.chunking, "fixed_token_fallback"
-                        )
-                        if doc_process_opts.chunking_explicit
-                        # No selector: chunking_func was invoked, which
-                        # defaults to chunking_by_token_size but may be
-                        # customized by the caller.
-                        else "legacy_chunking_func"
-                    ),
+                    # Set by the actual branch taken, not merely the persisted
+                    # selector. This distinguishes C custom success from its
+                    # fixed-token fallback after callback removal.
+                    "chunk_method": chunk_method,
                     # Mirrors the chunking start log line (params portion only,
                     # without the strategy prefix or file path) so admins can
                     # see the actual chunker params used.  Carried across
@@ -5252,29 +5353,17 @@ class _PipelineMixin:
                             f"{original_chunk_count} -> {len(chunking_result)}"
                         )
 
-                # Backfill block provenance for F/R/V chunks (P already carries
-                # sidecars; multimodal chunks too). Runs on the final, post-split
+                # Backfill block provenance for chunks produced by a built-in
+                # F/R/V path (including C's fixed-token fallback). P already
+                # carries sidecars; multimodal chunks do too. Runs on the final, post-split
                 # chunk list so each slice maps precisely to the block(s) its
                 # content covers. Raises ChunkBlockMatchError -> doc FAILED when a
                 # chunk cannot be located in blocks.jsonl.
                 #
-                # Gated to the built-in F/R/V strategies — or the legacy path only
-                # when ``chunking_func`` is still the unmodified default fixed-token
-                # chunker. A user-supplied ``chunking_func`` may emit summaries /
-                # rewritten text that cannot be located in blocks.jsonl, which would
-                # wrongly FAIL the document.
-                if doc_process_opts.chunking_explicit:
-                    sidecar_backfill_eligible = doc_process_opts.chunking in {
-                        "F",
-                        "R",
-                        "V",
-                    }
-                else:
-                    from lightrag.chunker import chunking_by_token_size
-
-                    sidecar_backfill_eligible = (
-                        self.chunking_func is chunking_by_token_size
-                    )
+                # Eligibility is set by the actual dispatch branch. A custom
+                # callback may emit summaries/rewritten text that cannot be
+                # located in blocks.jsonl and must never be backfilled merely
+                # because the persisted selector is C.
 
                 if blocks_path and sidecar_backfill_eligible:
                     from lightrag.sidecar import backfill_chunk_sidecars
@@ -5445,7 +5534,7 @@ class _PipelineMixin:
                     # upsert, so writing PROCESSED first opens a crash window
                     # where the status is durable but the graph/vector/chunk
                     # data is not — a false PROCESSED that recovery can never
-                    # detect (issue #3400: status is the commit record).
+                    # detect (status is the commit record).
                     await self._insert_done()
 
                     # A sibling document's flush error may have aborted the
@@ -5631,7 +5720,7 @@ class _PipelineMixin:
         # back stale IDs.
         #
         # Persist that reset together with retiring the purge journal, in one
-        # targeted write (issue #3400). In-memory-only was not enough: the
+        # targeted write. In-memory-only was not enough: the
         # stored chunks_list kept pointing at chunks this purge just deleted,
         # so a crash here left the row advertising them. Retiring the journal
         # in the SAME write is what keeps the two consistent — a surviving
@@ -5677,7 +5766,7 @@ class _PipelineMixin:
         Returning silently instead would let the merge proceed with the
         stored marker still ``pre_graph``: the graph gets written, and if the
         anchors are later lost, that stale marker is a false proof licensing
-        a purge to skip graph cleanup — the exact defect of issue #3400.
+        a purge to skip graph cleanup — the exact defect fail-closed prevents.
         """
         stored = await require_doc_status_record(
             self.doc_status, doc_id, purpose="advance kg_write_state"
@@ -6565,7 +6654,7 @@ class _PipelineMixin:
                     # authoritative LaTeX.  An otherwise valid response (name +
                     # description) must therefore not fail a whole document
                     # just because the model renamed or dropped that one field
-                    # (#3502).  Resolution order:
+                    #  Resolution order:
                     #   1. ``equation`` — the schema field, normalized as the
                     #      equation_analysis prompt requires (delimiters and
                     #      ``\tag{...}`` stripped, align→aligned, Markdown /

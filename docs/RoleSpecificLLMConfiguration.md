@@ -43,6 +43,12 @@ Common fields:
 | `LLM_TIMEOUT` | Base LLM timeout. A role inherits it when no role timeout is set. |
 | `MAX_ASYNC_LLM` | Base maximum LLM concurrency. A role inherits it when `{ROLE}_MAX_ASYNC_LLM` is not set. `MAX_ASYNC` is still accepted as a deprecated alias. |
 
+### File-processing interaction
+
+`MAX_ASYNC_LLM` is also the base value used by the file-processing scheduler: for one document, chunk entity/relation extraction runs at most this many tasks concurrently, and each entity-merge or relation-merge phase runs at most twice this many tasks. These are pipeline task limits, not a replacement for role-level request limiting.
+
+The Extract role performs both chunk extraction and description summaries during graph merging. `EXTRACT_MAX_ASYNC_LLM`, when set, limits its actual LLM requests; otherwise it inherits `MAX_ASYNC_LLM`. Changing this role override does not change the scheduler's per-document task limits. See [File Processing Pipeline Specification](FileProcessingPipeline.md#86-pipeline-concurrency-parameters) for the complete worker topology.
+
 ## Role Override Variables
 
 Each role can override the binding, model, endpoint, API key, concurrency, and timeout:
@@ -99,6 +105,10 @@ Common provider prefixes:
 | `lollms` | Uses the Ollama-compatible option set | `QUERY_OLLAMA_LLM_TEMPERATURE` |
 | `bedrock` | `BEDROCK_LLM_*` | `EXTRACT_BEDROCK_LLM_MAX_TOKENS` |
 | `gemini` | `GEMINI_LLM_*` | `VLM_GEMINI_LLM_THINKING_CONFIG` |
+
+This guide covers the role prefix and the inheritance rules. For the `{FIELD}` half —
+every option each prefix accepts, its type, its value syntax, and what the provider
+driver does with it — see [LLM and Embedding Provider Options Reference](./LLMProviderOptions.md).
 
 ## Inheritance Rules
 

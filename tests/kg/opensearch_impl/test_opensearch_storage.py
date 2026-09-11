@@ -231,8 +231,8 @@ def _make_client():
                 "status_counts": {"buckets": []},
                 "src": {"buckets": []},
                 "tgt": {"buckets": []},
-                "source_degrees": {"buckets": []},
-                "target_degrees": {"buckets": []},
+                "source_degrees": {"ids": {"buckets": []}},
+                "target_degrees": {"ids": {"buckets": []}},
             },
         }
     )
@@ -667,9 +667,11 @@ class TestKVStorage:
                 assert "update_time" in s._pending_upserts["k1"]
                 await s.index_done_callback()
                 actions = mock_bulk.call_args[0][1]
-                src = actions[0]["_source"]
-                assert "create_time" in src
-                assert "update_time" in src
+                # The replacement value travels as scripted-upsert params so
+                # the flush can restore a stored create_time server-side.
+                doc = actions[0]["script"]["params"]["doc"]
+                assert "create_time" in doc
+                assert "update_time" in doc
 
     @pytest.mark.asyncio
     async def test_is_empty(self, global_config, embed_func, mock_client):
@@ -905,7 +907,7 @@ class TestKVStorageBatching:
                 await s.index_done_callback()
                 actions = mock_bulk.call_args[0][1]
                 assert len(actions) == 1
-                assert actions[0]["_source"]["content"] == "second"
+                assert actions[0]["script"]["params"]["doc"]["content"] == "second"
 
     @pytest.mark.asyncio
     async def test_kv_delete_cancels_pending_upsert(
@@ -951,7 +953,8 @@ class TestKVStorageBatching:
                 await s.index_done_callback()
                 actions = mock_bulk.call_args[0][1]
                 assert len(actions) == 1
-                assert actions[0]["_op_type"] == "index"
+                # KV upserts flush as scripted updates (see issue #3870).
+                assert actions[0]["_op_type"] == "update"
 
     @pytest.mark.asyncio
     async def test_kv_delete_works_when_index_not_ready(
@@ -1382,7 +1385,7 @@ class TestKVStorageBatching:
                 for call in mock_bulk.call_args_list:
                     actions = call.args[1]
                     by_op[actions[0]["_op_type"]] = call.kwargs["chunk_size"]
-                assert by_op == {"delete": 22, "index": 11}
+                assert by_op == {"delete": 22, "update": 11}
 
 
 # ---------------------------------------------------------------------------
@@ -1549,7 +1552,7 @@ class TestDocStatusStorage:
             assert counts["processed"] == 5
 
     @pytest.mark.asyncio
-    async def test_get_docs_by_status(self, global_config, embed_func, mock_client):
+    async def test_get_docs_by_statuses(self, global_config, embed_func, mock_client):
         mock_client.search = AsyncMock(
             return_value={
                 "hits": {
@@ -1575,7 +1578,7 @@ class TestDocStatusStorage:
         with patch.object(ClientManager, "get_client", return_value=mock_client):
             s = self._make(global_config, embed_func)
             await s.initialize()
-            result = await s.get_docs_by_status(DocStatus.PROCESSED)
+            result = await s.get_docs_by_statuses([DocStatus.PROCESSED])
             assert "d1" in result
             assert isinstance(result["d1"], DocProcessingStatus)
 
@@ -1960,11 +1963,16 @@ class TestDocStatusStorage:
         with patch.object(ClientManager, "get_client", return_value=mock_client):
             s = self._make(global_config, embed_func)
             await s.initialize()
-            mock_client.indices.put_mapping.assert_awaited_once()
-            kwargs = mock_client.indices.put_mapping.call_args.kwargs
-            assert kwargs["body"] == {
-                "properties": {"content_hash": {"type": "keyword"}}
-            }
+            # Startup also stamps the workspace marker into ``_meta`` on this
+            # unmarked pre-existing index, so filter for the content_hash call.
+            property_bodies = [
+                call.kwargs["body"]
+                for call in mock_client.indices.put_mapping.await_args_list
+                if "properties" in call.kwargs["body"]
+            ]
+            assert property_bodies == [
+                {"properties": {"content_hash": {"type": "keyword"}}}
+            ]
 
     @pytest.mark.asyncio
     async def test_ensure_content_hash_mapping_skipped_when_present(
@@ -1991,7 +1999,14 @@ class TestDocStatusStorage:
         with patch.object(ClientManager, "get_client", return_value=mock_client):
             s = self._make(global_config, embed_func)
             await s.initialize()
-            mock_client.indices.put_mapping.assert_not_awaited()
+            # Only the workspace ``_meta`` marker may be written; no mapping
+            # property is added to an index that already has content_hash.
+            property_calls = [
+                call
+                for call in mock_client.indices.put_mapping.await_args_list
+                if "properties" in call.kwargs["body"]
+            ]
+            assert property_calls == []
 
     @pytest.mark.asyncio
     async def test_prepare_doc_status_data(self, global_config, embed_func):
@@ -2057,7 +2072,7 @@ class TestDocStatusStorage:
             assert await s.get_all_status_counts() == {}
             assert await s.get_docs_paginated(page=1, page_size=10) == ([], 0)
             assert await s.get_doc_by_file_path("/a.txt") is None
-            assert await s.get_docs_by_status(DocStatus.PROCESSED) == {}
+            assert await s.get_docs_by_statuses([DocStatus.PROCESSED]) == {}
 
             mock_client.count.assert_not_awaited()
             mock_client.search.assert_not_awaited()
@@ -2276,12 +2291,18 @@ class TestGraphStorage:
             return_value={
                 "hits": {"hits": [], "total": {"value": 0}},
                 "aggregations": {
-                    "source_degrees": {"buckets": [{"key": "A", "doc_count": 2}]},
+                    # Each degree aggregation is a `filter` wrapping the terms
+                    # agg, so its buckets sit one level down under "ids".
+                    "source_degrees": {
+                        "ids": {"buckets": [{"key": "A", "doc_count": 2}]}
+                    },
                     "target_degrees": {
-                        "buckets": [
-                            {"key": "A", "doc_count": 1},
-                            {"key": "B", "doc_count": 3},
-                        ]
+                        "ids": {
+                            "buckets": [
+                                {"key": "A", "doc_count": 1},
+                                {"key": "B", "doc_count": 3},
+                            ]
+                        }
                     },
                     "status_counts": {"buckets": []},
                     "src": {"buckets": []},
@@ -3693,9 +3714,19 @@ class TestGraphPPLDetection:
             assert result.nodes[0].id == "A"
 
     @pytest.mark.asyncio
-    async def test_ppl_bfs_truncates_nodes_by_depth_then_weight(
+    async def test_ppl_bfs_ranks_same_depth_nodes_by_degree_then_id(
         self, global_config, embed_func, mock_client
     ):
+        """A BFS level that overflows ``max_nodes`` must give up its slots by
+        degree descending, then id ascending -- the BaseGraphStorage contract.
+
+        ``_edge_rank_key`` settles which depth a node is reached at, but its
+        second term is the edge weight, so same-depth nodes used to be admitted
+        in the order their edges happened to sort. Here C and D are both reached
+        at depth 1 and only one slot is left: the high-weight edge belongs to D,
+        the higher degree to C, so the two rules disagree and the assertion
+        below picks the ranking rather than the edge property.
+        """
         mock_client.transport = AsyncMock()
         ppl_response = {
             "schema": [
@@ -3730,59 +3761,61 @@ class TestGraphPPLDetection:
         }
         mock_client.transport.perform_request = AsyncMock(return_value=ppl_response)
         mock_client.mget = AsyncMock(
-            side_effect=[
+            side_effect=_mget_by_ids_side_effect(
                 {
-                    "docs": [
-                        {
-                            "_id": "A",
-                            "found": True,
-                            "_source": {"entity_type": "person"},
-                        }
-                    ]
-                },
-                {
-                    "docs": [
-                        {
-                            "_id": "B",
-                            "found": True,
-                            "_source": {"entity_type": "person"},
-                        },
-                        {
-                            "_id": "D",
-                            "found": True,
-                            "_source": {"entity_type": "person"},
-                        },
-                    ]
-                },
-            ]
-        )
-        mock_client.search = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        {
-                            "_id": "e1",
-                            "_source": {
-                                "source_node_id": "A",
-                                "target_node_id": "B",
-                                "relationship": "knows",
-                            },
-                            "sort": [1],
-                        },
-                        {
-                            "_id": "e2",
-                            "_source": {
-                                "source_node_id": "B",
-                                "target_node_id": "D",
-                                "relationship": "knows",
-                            },
-                            "sort": [2],
-                        },
-                    ],
-                    "total": {"value": 2},
+                    "A": {"entity_type": "person"},
+                    "B": {"entity_type": "person"},
+                    "C": {"entity_type": "person"},
+                    "D": {"entity_type": "person"},
                 }
-            }
+            )
         )
+
+        edge_hits = {
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "e1",
+                        "_source": {
+                            "source_node_id": "A",
+                            "target_node_id": "B",
+                            "relationship": "knows",
+                        },
+                        "sort": [1],
+                    },
+                    {
+                        "_id": "e2",
+                        "_source": {
+                            "source_node_id": "A",
+                            "target_node_id": "C",
+                            "relationship": "knows",
+                        },
+                        "sort": [2],
+                    },
+                ],
+                "total": {"value": 2},
+            }
+        }
+        # C outranks D on degree while D owns the heavier edge.
+        degree_aggs = {
+            "hits": {"hits": []},
+            "aggregations": {
+                "source_degrees": {
+                    "ids": {
+                        "buckets": [
+                            {"key": "C", "doc_count": 5},
+                            {"key": "B", "doc_count": 1},
+                        ]
+                    }
+                },
+                "target_degrees": {"ids": {"buckets": [{"key": "D", "doc_count": 1}]}},
+            },
+        }
+
+        async def _search(index=None, body=None, **kwargs):
+            return degree_aggs if "aggs" in (body or {}) else edge_hits
+
+        mock_client.search = AsyncMock(side_effect=_search)
 
         with patch.object(ClientManager, "get_client", return_value=mock_client):
             s = self._make(global_config, embed_func)
@@ -3790,11 +3823,11 @@ class TestGraphPPLDetection:
 
             result = await s.get_knowledge_graph("A", max_depth=2, max_nodes=3)
 
-            assert [node.id for node in result.nodes] == ["A", "B", "D"]
+            assert sorted(node.id for node in result.nodes) == ["A", "B", "C"]
             assert result.is_truncated is True
             assert {(edge.source, edge.target) for edge in result.edges} == {
                 ("A", "B"),
-                ("B", "D"),
+                ("A", "C"),
             }
 
     @pytest.mark.asyncio
