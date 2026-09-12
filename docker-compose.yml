@@ -104,7 +104,13 @@ services:
       retries: 5
 
   qdrant:
-    image: qdrant/qdrant:latest
+    # PINNED. `:latest` resolved to 1.19.1 on 2026-09-03, which dropped RocksDB
+    # payload-index support and crash-looped on collections written by 1.17.0
+    # ("unknown variant `rocks_db`, expected `gridstore` or `mmap`"). Upgrade
+    # deliberately: step through the last RocksDB-capable release so Qdrant
+    # migrates the payload indexes to gridstore, verify the collection loads,
+    # THEN move to 1.19+. Never float a database image on `latest`.
+    image: qdrant/qdrant:v1.17.0
     container_name: lightrag-qdrant
     volumes:
       - ./data/qdrant:/qdrant/storage
